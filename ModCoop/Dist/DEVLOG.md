@@ -43,7 +43,10 @@
    после `make` пересоберите DLL ещё раз.
    Внимание: в `[Editor.EditorEngine] EditPackages` нельзя добавлять пакеты игры, если рядом лежат их выгруженные
    исходники (`ucc batchexport`). Make попытается их перекомпилировать. Для зависимостей используйте `[UCC.Make] AutoLoad+=`.
-3. **Архив**: `powershell -ExecutionPolicy Bypass -File ModCoop\package.ps1` → `SWRC-Coop-1.0.zip` рядом с `Code`.
+3. **Тест на одном ПК** (без батников): хост
+   `CT.exe "GEO_01A?game=ModCoop.CoopGame?listen?MaxPlayers=2" -windowed -forcelogflush -CoopNoSetup LOG=CoopHost.log`,
+   клиент `CT.exe "Entry?Menu=ModCoop.CoopJoinMenu" -CoopConnect=127.0.0.1 -windowed -forcelogflush -CoopNoSetup LOG=CoopClient.log`.
+4. **Архив**: `powershell -ExecutionPolicy Bypass -File ModCoop\package.ps1` → `SWRC-Coop-1.0.zip` рядом с `Code`.
 
 ## Нативные исправления (почему C++)
 
@@ -90,6 +93,7 @@
 | (живой тест, 1.2) Клиент поднимает хоста — анимация сбрасывается | `TargetType`/`Target` вычисляются только на машине игрока; на сервере у клиента `TGT_Default`, и `BactaHealer.Idle.BeginState` на сервере принудительно переключал оружие | клиент отправляет цель на сервер при её смене (`ServerCoopSetTarget`) |
 | (живой тест, 1.2) Лежат хост и отряд, клиент жив — перезапуск уровня | SP-код каждый кадр вызывает `BleedOut` у раненого хоста, когда помочь некому | перехват `Pawn.BleedOut`: пока жив хоть один клиент, хост ждёт подъёма до `HostReviveWaitTime` (60 с); скриптовый `ACTION_FailMission` (хост не ранен) не задерживается. Проверено тестом `?CoopTest=hostdown` |
 | (живой тест, 1.2) Визор/фонарь у клиента не работает | `PlayerCommando` создаёт `CloneHeadlamp` в `PostBeginPlay` (только сервер), `GotoVisionMode` на клиенте выходил при `Flashlight == None` | `CoopCommando.PostNetBeginPlay` создаёт фонарь на клиенте |
+| Батники неудобны: игроку нужно знать, какой запускать | Всё, что делали батники, уже есть в меню (`CO-OP: HOST/JOIN`) | bat-файлы удалены. `ModCoop.dll` при первом запуске `CT.exe` один раз создаёт ярлык на рабочем столе (`-forcelogflush`) и один раз спрашивает про правило брандмауэра (`MessageBox` → `netsh` через UAC, только с согласия игрока; маркеры `Save\ModCoopShortcut.done` / `ModCoopFirewall.done`, пропуск — `-CoopNoSetup`). `ModCoop.u` не пересобирался, версия осталась 1.3 |
 | Меню переподключения делало одну попытку | неудачный `open` из меню не открывает `MenuConnectionFailed` | меню само ждёт таймаут и повторяет (до 12 раз) |
 
 ## Проверено (автотесты на одном ПК, хост + клиент 127.0.0.1)

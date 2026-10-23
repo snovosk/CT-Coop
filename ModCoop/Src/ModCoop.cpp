@@ -2,6 +2,13 @@
 #include "IpDrv.h"
 #include "CodeInjection.h"
 
+#include <shlobj.h>
+#include <shellapi.h>
+
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "uuid.lib")
+
 /*
  * CoopNative
  */
@@ -306,6 +313,163 @@ static void InstallStaticActorFix()
 	debugf(NAME_Warning, "ModCoop: UTcpNetDriver::TickDispatch slot not found, static actor fix disabled");
 }
 
+/*
+ * First start setup: desktop shortcut and firewall rule.
+ * Each step runs only once per installation (marker files in the save directory), so deleting the shortcut or declining the
+ * firewall question is respected. Start the game with -CoopNoSetup to skip it.
+ */
+static const wchar_t* FirewallRuleName = L"SWRC Coop (CT.exe)";
+
+static FString SetupMarkerPath(const TCHAR* Name)
+{
+	return GSavePath * Name;
+}
+
+static UBOOL HasSetupMarker(const TCHAR* Name)
+{
+	return GFileManager->FileSize(*SetupMarkerPath(Name)) >= 0;
+}
+
+static void WriteSetupMarker(const TCHAR* Name)
+{
+	appSaveStringToFile(FString("done"), *SetupMarkerPath(Name));
+}
+
+static DWORD RunHidden(wchar_t* CommandLine)
+{
+	STARTUPINFOW        StartupInfo = {sizeof(StartupInfo)};
+	PROCESS_INFORMATION ProcessInfo = {0};
+	DWORD               ExitCode    = 0xFFFFFFFF;
+
+	if(CreateProcessW(NULL, CommandLine, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &StartupInfo, &ProcessInfo))
+	{
+		if(WaitForSingleObject(ProcessInfo.hProcess, 10000) == WAIT_OBJECT_0)
+			GetExitCodeProcess(ProcessInfo.hProcess, &ExitCode);
+
+		CloseHandle(ProcessInfo.hThread);
+		CloseHandle(ProcessInfo.hProcess);
+	}
+
+	return ExitCode;
+}
+
+static void CreateDesktopShortcut(const wchar_t* ExePath)
+{
+	wchar_t Desktop[MAX_PATH];
+
+	if(FAILED(SHGetFolderPathW(NULL, CSIDL_DESKTOPDIRECTORY, NULL, SHGFP_TYPE_CURRENT, Desktop)))
+		return;
+
+	wchar_t LinkPath[MAX_PATH];
+	wsprintfW(LinkPath, L"%s\\Star Wars Republic Commando Co-op.lnk", Desktop);
+
+	wchar_t WorkingDir[MAX_PATH];
+	lstrcpynW(WorkingDir, ExePath, MAX_PATH);
+	wchar_t* LastSlash = wcsrchr(WorkingDir, L'\\');
+
+	if(LastSlash)
+		*LastSlash = 0;
+
+	HRESULT ComResult = CoInitialize(NULL);
+	IShellLinkW* Link = NULL;
+
+	if(SUCCEEDED(CoCreateInstance(CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER, IID_IShellLinkW, reinterpret_cast<void**>(&Link))))
+	{
+		Link->SetPath(ExePath);
+		Link->SetWorkingDirectory(WorkingDir);
+		Link->SetArguments(L"-forcelogflush");
+		Link->SetIconLocation(ExePath, 0);
+		Link->SetDescription(L"Star Wars: Republic Commando (Co-op)");
+
+		IPersistFile* File = NULL;
+
+		if(SUCCEEDED(Link->QueryInterface(IID_IPersistFile, reinterpret_cast<void**>(&File))))
+		{
+			if(SUCCEEDED(File->Save(LinkPath, TRUE)))
+				debugf("ModCoop: Created desktop shortcut");
+
+			File->Release();
+		}
+
+		Link->Release();
+	}
+
+	if(SUCCEEDED(ComResult))
+		CoUninitialize();
+}
+
+static void EnsureFirewallRule(const wchar_t* ExePath)
+{
+	// netsh returns 0 if a rule with this name exists
+	wchar_t Check[512];
+	wsprintfW(Check, L"netsh advfirewall firewall show rule name=\"%s\"", FirewallRuleName);
+
+	if(RunHidden(Check) == 0)
+		return;
+
+	// "Allow the coop mod to accept connections from other players in the Windows firewall? Administrator rights are required.
+	//  Without it players can't connect to your game when you host. You can do it later by deleting ModCoopFirewall.done in GameData\Save."
+	const wchar_t* Question =
+		L"\u0420\u0430\u0437\u0440\u0435\u0448\u0438\u0442\u044C CT.exe \u043F\u0440\u0438\u043D\u0438\u043C\u0430\u0442\u044C \u043F\u043E\u0434\u043A\u043B\u044E\u0447\u0435\u043D\u0438\u044F \u0434\u0440\u0443\u0433\u0438\u0445 \u0438\u0433\u0440\u043E\u043A\u043E\u0432 \u0432 \u0431\u0440\u0430\u043D\u0434\u043C\u0430\u0443\u044D\u0440\u0435 Windows?\n\n\u042D\u0442\u043E \u043D\u0443\u0436\u043D\u043E, \u0447\u0442\u043E\u0431\u044B \u0434\u0440\u0443\u0437\u044C\u044F \u043C\u043E\u0433\u043B\u0438 \u043F\u043E\u0434\u043A\u043B\u044E\u0447\u0438\u0442\u044C\u0441\u044F, \u043A\u043E\u0433\u0434\u0430 \u0432\u044B \u0445\u043E\u0441\u0442. \u041F\u043E\u0442\u0440\u0435\u0431\u0443\u044E\u0442\u0441\u044F \u043F\u0440\u0430\u0432\u0430 \u0430\u0434\u043C\u0438\u043D\u0438\u0441\u0442\u0440\u0430\u0442\u043E\u0440\u0430.";
+
+	if(MessageBoxW(NULL, Question, L"Republic Commando Co-op", MB_YESNO | MB_ICONQUESTION | MB_TOPMOST | MB_SETFOREGROUND) != IDYES)
+	{
+		debugf("ModCoop: Firewall rule declined");
+		return;
+	}
+
+	wchar_t Parameters[1024];
+	wsprintfW(Parameters, L"advfirewall firewall add rule name=\"%s\" dir=in action=allow program=\"%s\" protocol=udp profile=any enable=yes",
+	          FirewallRuleName, ExePath);
+
+	SHELLEXECUTEINFOW Execute = {sizeof(Execute)};
+	Execute.fMask        = SEE_MASK_NOCLOSEPROCESS;
+	Execute.lpVerb       = L"runas"; // Shows the UAC prompt
+	Execute.lpFile       = L"netsh.exe";
+	Execute.lpParameters = Parameters;
+	Execute.nShow        = SW_HIDE;
+
+	if(ShellExecuteExW(&Execute) && Execute.hProcess)
+	{
+		WaitForSingleObject(Execute.hProcess, 30000);
+		CloseHandle(Execute.hProcess);
+		debugf("ModCoop: Added firewall rule");
+	}
+	else
+	{
+		debugf("ModCoop: Adding the firewall rule was cancelled");
+	}
+}
+
+static void FirstStartSetup()
+{
+	if(GIsEditor || ParseParam(appCmdLine(), "CoopNoSetup"))
+		return;
+
+	wchar_t ExePath[MAX_PATH];
+
+	if(!GetModuleFileNameW(NULL, ExePath, MAX_PATH))
+		return;
+
+	// Only for the coop launcher, not for the original game executable
+	const wchar_t* ExeName = wcsrchr(ExePath, L'\\');
+
+	if(!ExeName || lstrcmpiW(ExeName + 1, L"CT.exe") != 0)
+		return;
+
+	if(!HasSetupMarker("ModCoopShortcut.done"))
+	{
+		CreateDesktopShortcut(ExePath);
+		WriteSetupMarker("ModCoopShortcut.done");
+	}
+
+	if(!HasSetupMarker("ModCoopFirewall.done"))
+	{
+		WriteSetupMarker("ModCoopFirewall.done");
+		EnsureFirewallRule(ExePath);
+	}
+}
+
 void UCoopNative::execInstallClientFixes(FFrame& Stack, void* Result)
 {
 	P_FINISH;
@@ -316,6 +480,8 @@ void UCoopNative::execInstallClientFixes(FFrame& Stack, void* Result)
 		return;
 
 	Installed = 1;
+
+	FirstStartSetup();
 
 	UByteProperty* NetModeProperty = FindField<UByteProperty>(ALevelInfo::StaticClass(), "NetMode");
 
