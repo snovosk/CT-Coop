@@ -94,6 +94,15 @@ void UFunctionOverride::execInit(FFrame& Stack, void* Result)
 				  OverrideForAllObjects ? InTargetObject->GetName() : InTargetObject->GetClass()->GetName());
 	}
 
+	/*
+	 * If another override for this function is still active (e.g. one from the previous level that has not been garbage collected yet),
+	 * remove it first. Otherwise the hook would be stored as the original function and calling the original would recurse forever.
+	 */
+	UFunctionOverride** ExistingOverride = FunctionOverrides.Find(TargetFunction);
+
+	if(ExistingOverride && *ExistingOverride != this)
+		(*ExistingOverride)->Deinit();
+
 	OriginalFunctionFlags = TargetFunction->FunctionFlags;
 	TargetFunction->FunctionFlags |= FUNC_Native;
 	OriginalNative = TargetFunction->Func;

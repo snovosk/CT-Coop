@@ -24,6 +24,9 @@ var() config bool    EnableCustomMenu;
 var() config bool    EnableEditorSelectionFix;
 var() config bool    EditorLoadMRUOnStart;
 var() config bool    DisableWindowPositionVerification;
+var() config array<string> ExtensionClasses; // Optional SWRCFixExtension subclasses that are loaded at startup if their package exists
+
+var array<SWRCFixExtension> Extensions;
 
 var FunctionOverride CTPlayerEndZoomOverride;
 var FunctionOverride CTPlayerResetFOVOverride;
@@ -67,6 +70,41 @@ event InitScript()
 
 	MPPawnSetHudArmTextureOverride = new class'FunctionOverride';
 	MPPawnSetHudArmTextureOverride.Init(class'MPPawn', 'SetHudArmTexture', self, 'MPPawnSetHudArmTexture');
+
+	LoadExtensions();
+}
+
+function LoadExtensions()
+{
+	local int i;
+	local class<SWRCFixExtension> ExtensionClass;
+	local SWRCFixExtension Extension;
+
+	for(i = 0; i < ExtensionClasses.Length; ++i)
+	{
+		ExtensionClass = class<SWRCFixExtension>(DynamicLoadObject(ExtensionClasses[i], class'Class', true));
+
+		if(ExtensionClass == None)
+			continue; // Extension is not installed
+
+		Log("Loading SWRCFix extension '" $ ExtensionClass $ "'");
+		Extension = new ExtensionClass;
+		Extensions[Extensions.Length] = Extension;
+		Extension.Init(self);
+	}
+}
+
+function string RedirectMenuClass(string MenuClassName)
+{
+	local int i;
+
+	if(MenuClassName == "XInterfaceCTMenus.CTGameOptionsPCMenu")
+		MenuClassName = "Mod.ModGameOptionsMenu";
+
+	for(i = 0; i < Extensions.Length; ++i)
+		MenuClassName = Extensions[i].RedirectMenuClass(MenuClassName);
+
+	return MenuClassName;
 }
 
 simulated function MPPawnSetHudArmTexture(Weapon Weapon)
@@ -251,8 +289,7 @@ simulated function MenuBaseCallMenuClass(String MenuClassName, optional String A
 {
 	local MenuBase Menu;
 
-	if(MenuClassName == "XInterfaceCTMenus.CTGameOptionsPCMenu")
-		MenuClassName = "Mod.ModGameOptionsMenu";
+	MenuClassName = RedirectMenuClass(MenuClassName);
 
 	Menu = MenuBase(MenuBaseCallMenuClassOverride.CurrentSelf);
 
@@ -263,8 +300,7 @@ simulated function MenuBaseOverlayMenuClass(String MenuClassName, optional Strin
 {
 	local MenuBase Menu;
 
-	if(MenuClassName == "XInterfaceCTMenus.CTGameOptionsPCMenu")
-		MenuClassName = "Mod.ModGameOptionsMenu";
+	MenuClassName = RedirectMenuClass(MenuClassName);
 
 	Menu = MenuBase(MenuBaseOverlayMenuClassOverride.CurrentSelf);
 
@@ -275,8 +311,7 @@ simulated function MenuBaseGotoMenuClass(String MenuClassName, optional String A
 {
 	local MenuBase Menu;
 
-	if(MenuClassName == "XInterfaceCTMenus.CTGameOptionsPCMenu")
-		MenuClassName = "Mod.ModGameOptionsMenu";
+	MenuClassName = RedirectMenuClass(MenuClassName);
 
 	Menu = MenuBase(MenuBaseGotoMenuClassOverride.CurrentSelf);
 
@@ -304,6 +339,7 @@ defaultproperties
 	EnableEditorSelectionFix=True
 	EditorLoadMRUOnStart=True
 	DisableWindowPositionVerification=True
+	ExtensionClasses(0)="ModCoop.CoopExtension"
 	MPCloneHudArmsShaders(0)=(Pawn=Shader'CloneTextures.CloneTextures.CloneCommandoWhite_Shader',HudArms=Shader'HudArmsTextures.HudArms.HudArmsWhite_Shader')
 	MPCloneHudArmsShaders(1)=(Pawn=Shader'CloneTextures.CloneTextures.MP_CloneCommandoD_Shader',HudArms=Shader'HudArmsTextures.HudArms.MP_HudArmsD_Shader')
 	MPCloneHudArmsShaders(2)=(Pawn=Shader'CloneTextures.CloneTextures.MP_CloneCommandoB_Shader',HudArms=Shader'HudArmsTextures.HudArms.MP_HudArmsB_Shader')

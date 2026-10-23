@@ -7,6 +7,7 @@
 begin_project(CT) {
 	Target mod;
 	Target modMpGame;
+	Target modCoop;
 	Target openglDrv;
 	Target ct;
 
@@ -70,6 +71,17 @@ begin_project(CT) {
 		"Src/ModMPGame.cpp,"
 		"Src/ModMPGameClasses.cpp");
 	target_defines(modMpGame, "MODMPGAME_API=DLL_EXPORT");
+
+	/*
+	 * ModCoop
+	 */
+
+	project_directory("ModCoop");
+
+	modCoop = shared_library("ModCoop",
+		"Src/ModCoop.cpp,"
+		"Src/ModCoopClasses.cpp");
+	target_defines(modCoop, "MODCOOP_API=DLL_EXPORT");
 
 	/*
 	 * OpenGLDrv

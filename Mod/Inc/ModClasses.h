@@ -62,7 +62,9 @@ public:
     BITFIELD EnableEditorSelectionFix:1;
     BITFIELD EditorLoadMRUOnStart:1;
     BITFIELD DisableWindowPositionVerification:1;
-    class UFunctionOverride* CTPlayerEndZoomOverride GCC_PACK(4);
+    TArrayNoInit<FString> ExtensionClasses GCC_PACK(4);
+    TArrayNoInit<class USWRCFixExtension*> Extensions;
+    class UFunctionOverride* CTPlayerEndZoomOverride;
     class UFunctionOverride* CTPlayerResetFOVOverride;
     class UFunctionOverride* PlayerControllerShakeViewOverride;
     class UFunctionOverride* WeaponSetWeapFOVOverride;

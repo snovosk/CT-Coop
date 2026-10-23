@@ -619,6 +619,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 		appInit(appPackage(), lpCmdLine, &Log, &Error, &Warn, FConfigCacheIni::Factory, 1);
 
+		// Write every log line to disk immediately so the log is complete if the game crashes
+		Log.Unbuffered = ParseParam(appCmdLine(), "FORCELOGFLUSH");
+
 		GIsClient = ParseParam(appCmdLine(), "SERVER") == 0;
 		GIsServer = 1;
 		GIsEditor = 0;

@@ -72,3 +72,13 @@ tags
 /UWindow
 /UnrealEd
 /WinDrv
+
+# Visual Studio upgrade and build output (ModCoop)
+/Backup
+UpgradeLog.htm
+*/Release/
+*/Debug/
+*/Lib/
+*.pch
+*.recipe
+*.vcxproj.user
