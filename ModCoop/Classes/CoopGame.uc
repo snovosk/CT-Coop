@@ -33,6 +33,19 @@ var string    TestAction;
 var float     TestTime;
 var int       TestStep;
 
+var array<Pawn> IncapacitatedPawns; // Pawns the clients were told are incapacitated (see SyncIncapacitated)
+
+// See SyncIdleStates
+struct SentIdleState
+{
+	var Pawn P;
+	var byte State;
+};
+var array<SentIdleState> SentIdleStates;
+var array<Actor> ScaledMapActors; // See MakeMapActorsRelevant
+var float NextIdleStateSync;
+var float NextIdleStateResend;
+
 const GAME_CLASS = "ModCoop.CoopGame";
 
 event InitGame(string Options, out string Error)
@@ -54,6 +67,7 @@ event InitGame(string Options, out string Error)
 
 	// Drop clients that crashed or lost the connection faster than the System.ini default of 120 seconds
 	class'CoopNative'.static.SetNetTimeouts(class'CoopConfig'.default.ServerTimeout, class'CoopConfig'.default.ServerTimeout);
+	class'CoopNative'.static.SetNetRates(class'CoopConfig'.default.NetClientRate, class'CoopConfig'.default.NetTickRate);
 
 	TestAction = ParseOption(Options, "CoopTest");
 	TestTime = float(ParseOption(Options, "CoopTestDelay"));
@@ -368,6 +382,8 @@ function Timer()
 	if(TestAction != "")
 		TickTest();
 
+	SyncIncapacitated();
+
 	if(class'CoopConfig'.default.bDebugLog)
 		LogPawns();
 
@@ -406,6 +422,137 @@ function Timer()
 			CP.DeadTime = 0;
 			CheckCatchUp(CP);
 		}
+
+		SendMapActorDisplay(CP);
+	}
+}
+
+/*
+ * The native replication of pawns doesn't send bIncapacitated to clients (the script replication block of Pawn has no effect).
+ * Clients therefore never saw anybody as incapacitated and could not revive the host or squad members with the bacta healer.
+ * The state is sent to the clients through their controllers instead. Incapacitated pawns are sent again every second so
+ * clients that joined later or for which the pawn only just became relevant get it too.
+ */
+function SyncIncapacitated()
+{
+	local Pawn P;
+	local int i;
+
+	for(i = IncapacitatedPawns.Length - 1; i >= 0; --i)
+	{
+		P = IncapacitatedPawns[i];
+
+		if(P == None || P.bDeleteMe || !P.bIncapacitated)
+		{
+			if(P != None && !P.bDeleteMe)
+				SendIncapacitated(P, false);
+
+			IncapacitatedPawns.Remove(i, 1);
+		}
+	}
+
+	foreach DynamicActors(class'Pawn', P)
+	{
+		if(!P.bIncapacitated)
+			continue;
+
+		for(i = 0; i < IncapacitatedPawns.Length; ++i)
+		{
+			if(IncapacitatedPawns[i] == P)
+				break;
+		}
+
+		if(i == IncapacitatedPawns.Length)
+			IncapacitatedPawns[i] = P;
+
+		SendIncapacitated(P, true);
+	}
+}
+
+/*
+ * The AI sets the stance of its pawn (CurrentIdleState: relaxed, alert, berserk, on a turret...) on the server. It is not replicated
+ * and it selects the breathe, walk and run animations: on clients every NPC stayed in its default stance, e.g. droids walked around
+ * relaxed with lowered weapons in the middle of a fight. Changes are sent to the clients and everything again every few seconds
+ * for clients that joined later or for which a pawn only just became relevant.
+ */
+event Tick(float DeltaTime)
+{
+	Super.Tick(DeltaTime);
+
+	if(Level.TimeSeconds >= NextIdleStateSync)
+	{
+		NextIdleStateSync = Level.TimeSeconds + 0.2;
+		SyncIdleStates(Level.TimeSeconds >= NextIdleStateResend);
+
+		if(Level.TimeSeconds >= NextIdleStateResend)
+			NextIdleStateResend = Level.TimeSeconds + 3.0;
+	}
+}
+
+function SyncIdleStates(bool bResendAll)
+{
+	local Pawn P;
+	local int i;
+	local Controller C;
+	local bool bHasClient;
+
+	for(C = Level.ControllerList; C != None; C = C.nextController)
+	{
+		if(CoopPlayer(C) != None && !IsHost(C))
+		{
+			bHasClient = true;
+			break;
+		}
+	}
+
+	for(i = SentIdleStates.Length - 1; i >= 0; --i)
+	{
+		if(SentIdleStates[i].P == None || SentIdleStates[i].P.bDeleteMe)
+			SentIdleStates.Remove(i, 1);
+	}
+
+	if(!bHasClient)
+		return;
+
+	foreach DynamicActors(class'Pawn', P)
+	{
+		if(P.Controller == None || PlayerController(P.Controller) != None || P.Health <= 0)
+			continue;
+
+		for(i = 0; i < SentIdleStates.Length; ++i)
+		{
+			if(SentIdleStates[i].P == P)
+				break;
+		}
+
+		if(i == SentIdleStates.Length)
+		{
+			SentIdleStates.Length = i + 1;
+			SentIdleStates[i].P = P;
+			SentIdleStates[i].State = P.default.CurrentIdleState;
+		}
+
+		if(SentIdleStates[i].State != P.CurrentIdleState || bResendAll)
+		{
+			SentIdleStates[i].State = P.CurrentIdleState;
+
+			for(C = Level.ControllerList; C != None; C = C.nextController)
+			{
+				if(CoopPlayer(C) != None && !IsHost(C))
+					CoopPlayer(C).ClientCoopSetIdleState(P, P.CurrentIdleState);
+			}
+		}
+	}
+}
+
+function SendIncapacitated(Pawn P, bool bIncapacitated)
+{
+	local Controller C;
+
+	for(C = Level.ControllerList; C != None; C = C.nextController)
+	{
+		if(CoopPlayer(C) != None && !IsHost(C))
+			CoopPlayer(C).ClientCoopSetIncapacitated(P, bIncapacitated);
 	}
 }
 
@@ -465,6 +612,73 @@ function CheckHostDown()
 }
 
 // Leaves levels that can't be played in coop (see SkipBriefing)
+/*
+ * Dynamic static meshes placed in the map (e.g. gun positions and other objects that are destroyed or shown by scripts) are
+ * replicated, so clients delete their own copies when loading the map. The server only sends an actor while it considers it
+ * relevant, which for these is a visibility trace to the actor's origin. The origin of large meshes is often inside other geometry:
+ * clients saw objects appear late or not at all. They are made always relevant.
+ * DrawScale3D, PrePivot and Skins are not replicated: a client created these from the class defaults and e.g. a gun position had
+ * a completely different shape. The actors that need it are remembered and sent to the clients (SendMapActorDisplay).
+ */
+function MakeMapActorsRelevant()
+{
+	local Actor A;
+	local int Num;
+
+	foreach AllActors(class'Actor', A)
+	{
+		if(A.DrawType == DT_StaticMesh && !A.bStatic && !A.bAlwaysRelevant && !A.bOnlyRelevantToOwner && A.RemoteRole != ROLE_None &&
+		   Pawn(A) == None && A.Owner == None)
+		{
+			A.bAlwaysRelevant = true;
+			++Num;
+
+			if(A.DrawScale3D != A.default.DrawScale3D || A.PrePivot != A.default.PrePivot || A.Skins.Length > 0)
+				ScaledMapActors[ScaledMapActors.Length] = A;
+		}
+	}
+
+	Log("CoopGame: Made " $ Num $ " map actors always relevant, " $ ScaledMapActors.Length $ " need their display properties sent");
+}
+
+// Called every second: sends up to 30 of ScaledMapActors to the client, ten passes over all of them once the client has a pawn
+// (unreliable, sent while the client is still loading or before an actor exists on the client the call is lost or A is None)
+function SendMapActorDisplay(CoopPlayer CP)
+{
+	local int i;
+	local Actor A;
+	local Material Skin0, Skin1;
+
+	if(CP.Pawn == None || CP.DisplaySyncPasses >= 10 || ScaledMapActors.Length == 0)
+		return;
+
+	for(i = 0; i < 30; ++i)
+	{
+		if(CP.DisplaySyncIndex >= ScaledMapActors.Length)
+		{
+			CP.DisplaySyncIndex = 0;
+			++CP.DisplaySyncPasses;
+			return;
+		}
+
+		A = ScaledMapActors[CP.DisplaySyncIndex++];
+
+		if(A == None || A.bDeleteMe)
+			continue;
+
+		Skin0 = None;
+		Skin1 = None;
+
+		if(A.Skins.Length > 0)
+			Skin0 = A.Skins[0];
+
+		if(A.Skins.Length > 1)
+			Skin1 = A.Skins[1];
+
+		CP.ClientCoopSetActorDisplay(A, A.DrawScale3D.X, A.DrawScale3D.Y, A.DrawScale3D.Z, A.PrePivot, Skin0, Skin1);
+	}
+}
+
 function CheckLevel()
 {
 	local PlayerController Host;
@@ -476,6 +690,7 @@ function CheckLevel()
 		return;
 
 	bCheckedLevel = true;
+	MakeMapActorsRelevant();
 	Host.GetCurrentMapName(Map);
 
 	if(SkipBriefing(Map) != Map)
@@ -563,6 +778,7 @@ function TickTest()
 	local Controller C;
 	local string NextMap;
 	local rotator R;
+	local Pawn P;
 
 	if(Level.TimeSeconds < TestTime)
 		return;
@@ -709,6 +925,8 @@ function TickTest()
 				R = rotator(Host.Pawn.Location - C.Pawn.Location);
 				R.Pitch = 0;
 				C.ClientSetRotation(R);
+				if(P != None)
+					Host.SetRotation(rotator(P.Location - Host.Pawn.Location));
 
 				if(TestStep > 0 && Host.Pawn.Physics == PHYS_Walking)
 				{
@@ -723,6 +941,115 @@ function TickTest()
 		if(TestStep < 8)
 		{
 			TestTime = Level.TimeSeconds + 2;
+			++TestStep;
+			return;
+		}
+	}
+	else if(TestAction ~= "clientrevive")
+	{
+		// The client revives the incapacitated host. Looking at the host and pressing use has to be done in the client window (test script).
+		// 0 = move client to host, 1 = incapacitate host, 2..31 = check every second
+		for(C = Level.ControllerList; C != None; C = C.nextController)
+		{
+			if(CoopPlayer(C) != None && !IsHost(C) && C.Pawn != None)
+				break;
+		}
+
+		if(C == None || Host == None || Host.Pawn == None)
+		{
+			Log("CoopTest: clientrevive: no client or host pawn");
+			TestAction = "";
+			return;
+		}
+
+		if(TestStep == 0)
+		{
+			TeleportToHost(CoopPlayer(C));
+		}
+		else if(TestStep == 1)
+		{
+			Log("CoopTest: Incapacitating host Distance=" $ VSize(C.Pawn.Location - Host.Pawn.Location));
+			// The squad would revive the host itself
+			foreach DynamicActors(class'Pawn', P)
+			{
+				if(P != Host.Pawn && P != C.Pawn && P.Squad != None && P.Squad == Host.Pawn.Squad)
+				{
+					P.TakeDamage(1000, None, P.Location, vect(0,0,0), class'CTDamageBallistic');
+					Log("CoopTest: Squad member " $ P $ " incapacitated=" $ P.bIncapacitated $ " Health=" $ P.Health);
+				}
+			}
+			Host.Pawn.TakeDamage(1000, None, Host.Pawn.Location, vect(0,0,0), class'CTDamageBallistic');
+		}
+		else if(TestStep < 32)
+		{
+
+			Log("CoopTest: clientrevive: Host incapacitated=" $ Host.Pawn.bIncapacitated $ " Health=" $ Host.Pawn.Health $
+			    " Client state=" $ C.GetStateName() $ " TargetType=" $ CoopPlayer(C).TargetType $ " Target=" $ CoopPlayer(C).Target $
+			    " Weapon=" $ C.Pawn.Weapon $ " WeaponState=" $ C.Pawn.Weapon.GetStateName());
+
+			if(TestStep > 2 && !Host.Pawn.bIncapacitated)
+			{
+				Log("CoopTest: clientrevive SUCCEEDED");
+				TestAction = "";
+			}
+		}
+		else
+		{
+			Log("CoopTest: clientrevive FAILED");
+			TestAction = "";
+		}
+
+		TestTime = Level.TimeSeconds + 1;
+		++TestStep;
+		return;
+	}
+	else if(TestAction ~= "npc" && TestStep == 0)
+	{
+		// Spawns a battle droid in front of the client (animations and rotation of AI on clients)
+		for(C = Level.ControllerList; C != None; C = C.nextController)
+		{
+			if(CoopPlayer(C) != None && !IsHost(C) && C.Pawn != None)
+			{
+				// To the side so the host doesn't block the view
+				R = C.Pawn.Rotation;
+				R.Pitch = 0;
+				R.Yaw += 8192;
+				P = Spawn(class<Pawn>(DynamicLoadObject("CTCharacters.BattleDroid", class'Class')),,, C.Pawn.Location + vector(R) * 500 + vect(0,0,40), rotator(-vector(R)));
+
+				if(P != None && P.Controller == None && P.ControllerClass != None)
+				{
+					P.Controller = Spawn(P.ControllerClass);
+					P.Controller.Possess(P);
+				}
+
+				if(P != None && P.Controller != None)
+					P.Controller.SetEnemy(C.Pawn);
+
+				C.ClientSetRotation(R);
+				Log("CoopTest: npc: spawned " $ P $ " Controller=" $ P.Controller);
+			}
+		}
+	}
+	else if(TestAction ~= "squadwalk")
+	{
+		// The host moves away so the squad runs after him in front of the client (animations of AI on clients)
+		for(C = Level.ControllerList; C != None; C = C.nextController)
+		{
+			if(CoopPlayer(C) != None && !IsHost(C) && C.Pawn != None)
+				break;
+		}
+
+		if(C != None && Host.Pawn != None && TestStep == 0)
+		{
+			R = C.Pawn.Rotation;
+			R.Pitch = 0;
+			Host.Pawn.SetLocation(C.Pawn.Location + vector(R) * 700);
+			Log("CoopTest: squadwalk: moved host");
+		}
+
+		if(TestStep < 1)
+		{
+			TestTime = Level.TimeSeconds + 1;
 			++TestStep;
 			return;
 		}

@@ -136,6 +136,49 @@ void UCoopNative::execSetNetTimeouts(FFrame& Stack, void* Result)
 	}
 }
 
+static void SetIntProperty(UObject* Object, const TCHAR* Name, INT Value)
+{
+	UIntProperty* Property = FindField<UIntProperty>(Object->GetClass(), Name);
+
+	if(Property)
+		*reinterpret_cast<INT*>(reinterpret_cast<BYTE*>(Object) + Property->Offset) = Value;
+}
+
+// -1 if the property doesn't exist
+static INT GetIntProperty(UObject* Object, const TCHAR* Name)
+{
+	UIntProperty* Property = FindField<UIntProperty>(Object->GetClass(), Name);
+
+	return Property ? *reinterpret_cast<INT*>(reinterpret_cast<BYTE*>(Object) + Property->Offset) : -1;
+}
+
+static void SetNetRateProperties(UObject* Object, INT MaxClientRate, INT ServerMaxTickRate)
+{
+	SetIntProperty(Object, "MaxClientRate", MaxClientRate);
+	SetIntProperty(Object, "MaxInternetClientRate", MaxClientRate);
+	SetIntProperty(Object, "NetServerMaxTickRate", ServerMaxTickRate);
+	SetIntProperty(Object, "LanServerMaxTickRate", ServerMaxTickRate);
+}
+
+void UCoopNative::execSetNetRates(FFrame& Stack, void* Result)
+{
+	P_GET_INT(MaxClientRate);
+	P_GET_INT(ServerMaxTickRate);
+	P_FINISH;
+
+	foreachobj(UNetDriver, It)
+	{
+		SetNetRateProperties(*It, MaxClientRate, ServerMaxTickRate);
+		debugf("ModCoop: Net rates of %s: MaxClientRate=%i NetServerMaxTickRate=%i", It->GetFullName(), GetIntProperty(*It, "MaxClientRate"), GetIntProperty(*It, "NetServerMaxTickRate"));
+	}
+
+	foreachobj(UClass, It)
+	{
+		if(It->IsChildOf(UNetDriver::StaticClass()) && It->GetDefaultObject())
+			SetNetRateProperties(It->GetDefaultObject(), MaxClientRate, ServerMaxTickRate);
+	}
+}
+
 void UCoopNative::execLoadSavedConfig(FFrame& Stack, void* Result)
 {
 	P_GET_OBJECT(UClass, ConfigClass);

@@ -7,7 +7,7 @@ class CoopConfig extends Object config(ModCoop);
  */
 
 // Mod version. Every player must have the same build (the package GUIDs must match), so increase this with every release.
-const MOD_VERSION = "1.3";
+const MOD_VERSION = "0.4";
 
 var config string        RecentAddresses[5]; // Most recent first. A static array because the config writer of RC comments out dynamic arrays.
 var config array<string> CoopLevels;       // Levels that can be selected in the host menu. Remove a level here to disable it.
@@ -23,6 +23,11 @@ var config float ReconnectInterval;
 
 var config float ClientTimeout;  // Seconds without data from the host until the client considers the connection lost (System.ini default is 120)
 var config float ServerTimeout;  // Same on the host for clients
+
+// The multiplayer defaults (10000 bytes/s per client at 20 updates per second, clients on the internet even only 5000) are far too
+// little for the dozens of AI of a campaign map: NPCs moved jerkily on clients because their positions were updated rarely
+var config int NetClientRate;  // Bytes per second per client
+var config int NetTickRate;    // Server updates per second
 
 var config bool bDebugLog; // Log positions of players on server and clients to compare synchronization
 
@@ -120,6 +125,8 @@ defaultproperties
 	ReconnectInterval=5.0
 	ClientTimeout=15.0
 	ServerTimeout=30.0
+	NetClientRate=40000
+	NetTickRate=35
 	CoopLevels(0)="GEO_01A"
 	CoopLevels(1)="GEO_01B"
 	CoopLevels(2)="GEO_01C"

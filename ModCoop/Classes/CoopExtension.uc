@@ -14,6 +14,7 @@ var FunctionOverride ConnectionFailedInitOverride;
 var FunctionOverride DisconnectOnYesOverride;
 var FunctionOverride PlayJumpOverride;
 var FunctionOverride PlayFallingOverride;
+var FunctionOverride GunshipPostBeginPlayOverride;
 
 function Init(SWRCFix Fix)
 {
@@ -37,6 +38,9 @@ function Init(SWRCFix Fix)
 
 	PlayFallingOverride = new class'FunctionOverride';
 	PlayFallingOverride.Init(class'Pawn', 'PlayFalling', self, 'PawnPlayFalling');
+
+	GunshipPostBeginPlayOverride = new class'FunctionOverride';
+	GunshipPostBeginPlayOverride.Init(class'Gunship', 'PostBeginPlay', self, 'GunshipPostBeginPlay');
 }
 
 /*
@@ -83,6 +87,39 @@ simulated function PawnPlayFalling()
 		P.LoopAnim('FallBreathe');
 	else
 		P.PlayBreathe();
+}
+
+/*
+ * Gunship.PostBeginPlay is simulated and spawns the ball turrets on network clients as well. These local copies are not the
+ * server's turrets: they get their own AI controller, are left behind when the gunship is destroyed, fall out of the world and
+ * die on the client without a GameInfo. Players on GEO_03D crashed in CTPlayer.PlayerTick (target selection) afterwards.
+ * The turrets of the server are replicated so the local copies are removed right away.
+ */
+simulated function GunshipPostBeginPlay()
+{
+	local Gunship G;
+
+	G = Gunship(GunshipPostBeginPlayOverride.CurrentSelf);
+	G.PostBeginPlay(); // Calls the original function
+
+	if(G.Level.NetMode != NM_Client)
+		return;
+
+	DestroyLocalTurret(G.LeftTurret);
+	DestroyLocalTurret(G.RightTurret);
+	G.LeftTurret = None;
+	G.RightTurret = None;
+}
+
+simulated function DestroyLocalTurret(Pawn Turret)
+{
+	if(Turret == None || Turret.Role != ROLE_Authority)
+		return;
+
+	if(Turret.Controller != None)
+		Turret.Controller.Destroy();
+
+	Turret.Destroy();
 }
 
 function string RedirectMenuClass(string MenuClassName)

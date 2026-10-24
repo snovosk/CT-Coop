@@ -20,6 +20,9 @@ native static final function ReleaseAllCDKeys();
 // Changes the connection timeouts of all net drivers and the defaults for new ones. Only in memory, System.ini is not modified.
 native static final function SetNetTimeouts(float ConnectionTimeout, float InitialConnectTimeout);
 
+// Changes the bandwidth per client and the server tick rates of all net drivers and the defaults for new ones. Only in memory.
+native static final function SetNetRates(int MaxClientRate, int ServerMaxTickRate);
+
 // The game reads mod config files from System but saves them to the save directory (GameData\Save).
 // This loads the class defaults from the saved file so settings like the recent addresses persist.
 native static final function LoadSavedConfig(class<Object> ConfigClass, string IniName);

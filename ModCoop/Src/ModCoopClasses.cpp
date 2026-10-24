@@ -18,6 +18,7 @@ FNativeEntry<UCoopNative> UCoopNative::StaticNativeMap[] = {
 	MAP_NATIVE(GetCommandLine,0)
 	MAP_NATIVE(ReleaseAllCDKeys,0)
 	MAP_NATIVE(SetNetTimeouts,0)
+	MAP_NATIVE(SetNetRates,0)
 	MAP_NATIVE(LoadSavedConfig,0)
 	MAP_NATIVE(InstallClientFixes,0)
 	{NULL,NULL}

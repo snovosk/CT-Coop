@@ -26,6 +26,7 @@ public:
     void execGetCommandLine(FFrame& Stack, void* Result);
     void execReleaseAllCDKeys(FFrame& Stack, void* Result);
     void execSetNetTimeouts(FFrame& Stack, void* Result);
+    void execSetNetRates(FFrame& Stack, void* Result);
     void execLoadSavedConfig(FFrame& Stack, void* Result);
     void execInstallClientFixes(FFrame& Stack, void* Result);
     DECLARE_CLASS(UCoopNative,UObject,0,ModCoop)
