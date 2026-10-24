@@ -22,16 +22,22 @@ var float       NextHostSkinCheck;
 var int         DisplaySyncIndex;  // Server only: see CoopGame.SendMapActorDisplay
 var int         DisplaySyncPasses;
 var bool        bSetCoopNetSpeed;
+var bool        bCoopTakeover;   // Server only: possessing a squad member (see CoopGame.TakeOver)
+var vector      TakeoverFromLocation; // Client only: camera flight to a taken over squad member (see PlayerCalcView)
+var rotator     TakeoverFromRotation;
+var float       TakeoverStartTime;
+var bool        bCoopHUDHidden, bWasHUDHidden, bWasHelmetDrawn; // See SetCoopHUDHidden
+var Pawn        WatchedMember;   // Server only: squad member whose scene this client watches before playing it (see CoopGame.CheckSceneWatch)
 var float       WeaponDownTime; // Client only: Level.TimeSeconds since when the weapon is down without being changed
 
 replication
 {
 	reliable if(Role == ROLE_Authority)
-		ClientCoopMessage, ClientCoopPawnRevived, ClientCoopSetIncapacitated, ClientCoopSetIdleState;
+		ClientCoopMessage, ClientCoopPawnRevived, ClientCoopSetIncapacitated, ClientCoopSetIdleState, ClientCoopSetPanelState, ClientCoopTakeoverCamera;
 	unreliable if(Role == ROLE_Authority)
-		ClientCoopSetActorDisplay;
+		ClientCoopSetActorDisplay, ClientCoopSetPanelLinks;
 	reliable if(Role < ROLE_Authority)
-		ServerTeleportToHost, ServerCoopSetTarget, ServerCoopUsingItem;
+		ServerTeleportToHost, ServerCoopSetTarget, ServerCoopUsingItem, ServerCoopUsePanel, ServerCoopStartHandSignal;
 }
 
 simulated event PostNetBeginPlay()
@@ -61,6 +67,41 @@ simulated function SetCoopNetSpeed()
 	bDynamicNetSpeed = false;
 	Log("ModCoop: Net speed " $ Player.CurrentNetSpeed $ ", requesting " $ class'CoopConfig'.default.NetClientRate);
 	SetNetSpeed(class'CoopConfig'.default.NetClientRate);
+}
+
+// See CoopGame.MakeMapActorsRelevant. Item is None if it does not exist on this client yet, it is sent again later.
+simulated function ClientCoopSetPanelLinks(ActivateItem Item, SquadMarker Marker, NavigationPoint Nav0, NavigationPoint Nav1, bool bUsableByPlayer)
+{
+	local Actor A;
+
+	if(Item == None || Item.Role == ROLE_Authority)
+		return;
+
+	Item.bIsUsableByPlayer = bUsableByPlayer;
+
+	if(Marker != None)
+	{
+		Item.SquadMarker = Marker;
+		Marker.Anchor = Item;
+	}
+
+	if(Nav0 != None && Item.NavPts.Length == 0)
+		Item.NavPts[0] = Nav0;
+
+	if(Nav1 != None && Item.NavPts.Length == 1)
+		Item.NavPts[1] = Nav1;
+
+	if(BactaDispenser(Item) != None)
+	{
+		for(A = Level.BactaDispenserList; A != None; A = BactaDispenser(A).NextDispenser)
+		{
+			if(A == Item)
+				return;
+		}
+
+		BactaDispenser(Item).NextDispenser = BactaDispenser(Level.BactaDispenserList);
+		Level.BactaDispenserList = Item;
+	}
 }
 
 // See CoopGame.MakeMapActorsRelevant. A is None if it does not exist on this client yet, it is sent again later.
@@ -216,7 +257,7 @@ simulated function LogPawns()
 			++Num;
 
 		if(PlayerCommando(P) != None || P.PlayerReplicationInfo != None)
-			Log("CoopDebug: Client " $ P.Class.Name $ " " $ P.Location $ " Health=" $ P.Health $ " Incap=" $ P.bIncapacitated $ " Role=" $ P.Role $ " Idle=" $ P.CurrentIdleState $ " Style=" $ P.CurrentMovementStyle $ " MovAnim=" $ P.MovementAnim $ " Enemy=" $ P.Controller.Enemy $ " Focus=" $ P.Controller.Focus);
+			Log("CoopDebug: Client " $ P.Class.Name $ " " $ P.Location $ " Health=" $ P.Health $ " Incap=" $ P.bIncapacitated $ " Role=" $ P.Role);
 	}
 
 	Log("CoopDebug: Client living pawns=" $ Num);
@@ -308,6 +349,104 @@ function ServerCoopUsingItem(bool bStart, Actor NewTarget, ETargetType NewTarget
 }
 
 /*
+ * Panels (bacta dispensers, hacking, explosives): CTPlayer.Use and StartHandSignal only change the panel and remember the hand signal
+ * target on the client. The hand signal weapon (HandSignal.MarkerHandSetup) and the panel run on the server which knew nothing about
+ * it: clients could not use any panel. The server does the same.
+ */
+exec function Use()
+{
+	local PlayerController Specialist;
+	local ActivateItem Item;
+
+	// The host can't order a squad marker whose specialist is played by a client (see CoopGame.MarkerSpecialist)
+	if(IsCoopHost() && CoopGame(Level.Game) != None && (TargetType == TGT_Marker || TargetType == TGT_MarkerCancel) && TargetMarker != None)
+	{
+		Specialist = CoopGame(Level.Game).MarkerClient(TargetMarker);
+
+		if(Specialist != None)
+		{
+			Item = ActivateItem(TargetMarker.Anchor);
+
+			if(Item != None)
+				Item.bIsUsableByPlayer = true;
+
+			ClientMessage(Specialist.PlayerReplicationInfo.PlayerName $ " has to do this himself");
+			return;
+		}
+	}
+
+	if(Level.NetMode == NM_Client && Pawn != None && TargetType == TGT_Panel && ActivateItem(Target) != None)
+		ServerCoopUsePanel(Target);
+
+	Super.Use();
+}
+
+function StartHandSignal()
+{
+	Super.StartHandSignal();
+
+	if(Role < ROLE_Authority)
+		ServerCoopStartHandSignal(HandSignalTargetType, HandSignalTarget, HandSignalTargetMarker);
+}
+
+// Same as the TGT_Panel case of CTPlayer.Use
+function ServerCoopUsePanel(Actor NewTarget)
+{
+	local ActivateItem TargetActivate;
+
+	TargetActivate = ActivateItem(NewTarget);
+
+	if(IsCoopHost() || Pawn == None || TargetActivate == None || VSize(TargetActivate.Location - Pawn.Location) > 500)
+		return;
+
+	if(TargetActivate.ActivateItemType == AIT_BactaDispenser && Pawn.Health >= Pawn.MaxHealth)
+		return;
+
+	if(!TargetActivate.bActivating)
+	{
+		TargetActivate.bPlayerActivated = true;
+		TargetActivate.bUsed = true;
+		TriggerEvent(TargetActivate.EventUnderway, TargetActivate, Pawn);
+	}
+}
+
+function ServerCoopStartHandSignal(ETargetType NewType, Actor NewTarget, SquadMarker NewMarker)
+{
+	local ActivateItem Item;
+
+	if(IsCoopHost())
+		return;
+
+	HandSignalTargetType = NewType;
+	HandSignalTarget = NewTarget;
+	HandSignalTargetMarker = NewMarker;
+
+	// Detonating a demolition charge: HandSignal.FireWeapon is called by the first person animation which only plays on the client
+	if(NewType == TGT_DemolitionReady)
+	{
+		Item = ActivateItem(NewTarget);
+
+		if((Item == None || Item.ActivateItemType != AIT_Plunger) && NewMarker != None)
+			Item = ActivateItem(NewMarker.Anchor);
+
+		if(Item == None || Item.ActivateItemType != AIT_Plunger)
+		{
+			foreach DynamicActors(class'ActivateItem', Item)
+			{
+				if(Item.ActivateItemType == AIT_Plunger && Item.bActivated && Item.User == self)
+					break;
+			}
+		}
+
+		if(Item != None && Item.ActivateItemType == AIT_Plunger && Item.bActivated)
+		{
+			Log("ModCoop: " $ PlayerReplicationInfo.PlayerName $ " detonates " $ Item);
+			Item.GotoState('Explode');
+		}
+	}
+}
+
+/*
  * Pawn.Reviving calls PawnRevived only on the server. The local player of a single player game is on the server but a client's
  * controller would stay in state CtrlIncapacitated: unable to move with the camera stuck at the 'DeathCamera' bone.
  */
@@ -324,6 +463,85 @@ simulated function ClientCoopSetIncapacitated(Pawn P, bool bIncapacitated)
 {
 	if(P != None && P.Role < ROLE_Authority)
 		P.bIncapacitated = bIncapacitated;
+}
+
+// Tutorial hints (CTPauseHintText, shown by scripts with ACTION_ShowDebriefingScreen) are not shown in coop
+exec event ShowMenu(optional string MenuClass, optional string Title, optional string Text, optional string PicName, optional string NewLevel)
+{
+	if(Level.NetMode != NM_Standalone && InStr(Caps(MenuClass), "PAUSEHINT") != -1)
+	{
+		Log("ModCoop: Skipped hint " $ Title);
+		return;
+	}
+
+	Super.ShowMenu(MenuClass, Title, Text, PicName, NewLevel);
+}
+
+/*
+ * The CD key check of the host (the GameSpy servers are long gone) refused a client whose key was in use by another player, e.g.
+ * two game instances on one PC or two players with the same copy after a level change. Coop doesn't care.
+ */
+simulated event ClientSetBadCDKey(bool bSet)
+{
+	if(bSet && Level.NetMode == NM_Client)
+	{
+		Log("ModCoop: Ignoring the host's CD key check");
+		return;
+	}
+
+	Super.ClientSetBadCDKey(bSet);
+}
+
+// See CoopGame.TakeOver
+simulated function ClientCoopTakeoverCamera(vector FromLocation, rotator FromRotation)
+{
+	TakeoverFromLocation = FromLocation;
+	TakeoverFromRotation = FromRotation;
+	TakeoverStartTime = Level.TimeSeconds;
+}
+
+// Moves the camera along an arc from the old pawn to the new one after a takeover
+event PlayerCalcView(out actor ViewActor, out vector CameraLocation, out rotator CameraRotation)
+{
+	local float Alpha;
+
+	Super.PlayerCalcView(ViewActor, CameraLocation, CameraRotation);
+
+	if(TakeoverStartTime == 0)
+		return;
+
+	Alpha = (Level.TimeSeconds - TakeoverStartTime) / 1.5;
+
+	if(Alpha >= 1.0 || Alpha < 0)
+	{
+		TakeoverStartTime = 0;
+		return;
+	}
+
+	Alpha = Alpha * Alpha * (3 - 2 * Alpha);
+	CameraLocation = TakeoverFromLocation + (CameraLocation - TakeoverFromLocation) * Alpha + vect(0,0,150) * Sin(Alpha * Pi);
+	CameraRotation = TakeoverFromRotation + Normalize(CameraRotation - TakeoverFromRotation) * Alpha;
+}
+
+// See CoopGame.SyncPanelStates
+simulated function ClientCoopSetPanelState(ActivateItem Item, byte Flags, byte ItemType, Pawn UserPawn)
+{
+	if(Item == None || Item.Role == ROLE_Authority)
+		return;
+
+	Item.bIsUsable = (Flags & 1) != 0;
+	Item.bIsUsableByPlayer = (Flags & 2) != 0;
+	Item.bActivating = (Flags & 4) != 0;
+	Item.bActivated = (Flags & 8) != 0;
+	Item.bPlayerActivated = (Flags & 16) != 0;
+	Item.ActivateItemType = EActivateItemType(ItemType);
+	Item.Instigator = UserPawn;
+
+	// Only the own controller exists on a client
+	if(UserPawn != None && UserPawn == Pawn)
+		Item.User = self;
+	else
+		Item.User = None;
 }
 
 // See CoopGame.SyncIdleStates. P is None if it is not relevant for this client.
@@ -371,7 +589,7 @@ simulated function bool IsCoopHost()
 
 function Possess(Pawn APawn)
 {
-	if(CoopCommando(APawn) == None)
+	if(CoopCommando(APawn) == None && !bCoopTakeover)
 	{
 		Super.Possess(APawn);
 		return;
@@ -467,14 +685,91 @@ exec function QuickSave()
 	ClientMessage("Saving is not available in coop. The level restarts from its beginning if the host dies.");
 }
 
+// Watching the scene of the squad member the client will play (CoopGame.CheckSceneWatch): no controls until the takeover
+state CoopWatching
+{
+	ignores SeePlayer, HearNoise, Bump;
+
+	exec function Fire(optional float F) {}
+	exec function AltFire(optional float F) {}
+	exec function Use() {}
+	exec function Jump(optional float F) {}
+	exec function ThrowGrenade(optional float F) {}
+	exec function SwitchWeapon(byte F) {}
+
+	function PlayerMove(float DeltaTime)
+	{
+		if(Pawn != None)
+			Pawn.Acceleration = vect(0,0,0);
+	}
+
+	function BeginState()
+	{
+		if(Pawn != None)
+		{
+			Pawn.Velocity = vect(0,0,0);
+			Pawn.Acceleration = vect(0,0,0);
+		}
+
+		// The client's own health, ammo and visor don't belong to the squad member it watches
+		SetCoopHUDHidden(true);
+	}
+
+	function EndState()
+	{
+		SetCoopHUDHidden(false);
+	}
+}
+
+simulated function SetCoopHUDHidden(bool bHidden)
+{
+	if(bHidden == bCoopHUDHidden)
+		return;
+
+	bCoopHUDHidden = bHidden;
+
+	if(myHUD != None)
+	{
+		if(bHidden)
+			bWasHUDHidden = myHUD.bHideHUD;
+
+		myHUD.bHideHUD = bHidden || bWasHUDHidden;
+	}
+
+	if(Helmet != None)
+	{
+		if(bHidden)
+			bWasHelmetDrawn = Helmet.bDraw;
+
+		Helmet.bDraw = !bHidden && bWasHelmetDrawn;
+	}
+}
+
 state UsingItem
 {
 	function BeginState()
 	{
 		Super.BeginState();
 
-		if(Role < ROLE_Authority)
+		// Not when the server's position correction put us back into this state after the use key was released (see PlayerTick)
+		if(Role < ROLE_Authority && bUse)
 			ServerCoopUsingItem(true, Target, TargetType);
+	}
+
+	/*
+	 * CTPlayer.UsingItem.PlayerTick asserts bUse. A client that released the use key leaves the state but the server only follows
+	 * a moment later: its position correction (ClientAdjustPosition sends the server's state) could put the client back into
+	 * UsingItem with bUse false and the assertion crashed the game (seen on GEO_01C).
+	 */
+	event PlayerTick(float DeltaTime)
+	{
+		if(!bUse)
+		{
+			GotoState('PlayerWalking');
+			return;
+		}
+
+		Super.PlayerTick(DeltaTime);
 	}
 
 	function EndState()

@@ -15,6 +15,7 @@ var FunctionOverride DisconnectOnYesOverride;
 var FunctionOverride PlayJumpOverride;
 var FunctionOverride PlayFallingOverride;
 var FunctionOverride GunshipPostBeginPlayOverride;
+var FunctionOverride HasRequiredInventoryOverride;
 
 function Init(SWRCFix Fix)
 {
@@ -41,6 +42,9 @@ function Init(SWRCFix Fix)
 
 	GunshipPostBeginPlayOverride = new class'FunctionOverride';
 	GunshipPostBeginPlayOverride.Init(class'Gunship', 'PostBeginPlay', self, 'GunshipPostBeginPlay');
+
+	HasRequiredInventoryOverride = new class'FunctionOverride';
+	HasRequiredInventoryOverride.Init(class'ActivateItem', 'HasRequiredInventory', self, 'ActivateItemHasRequiredInventory');
 }
 
 /*
@@ -120,6 +124,29 @@ simulated function DestroyLocalTurret(Pawn Turret)
 		Turret.Controller.Destroy();
 
 	Turret.Destroy();
+}
+
+/*
+ * The target selection of the player (native CTPlayer.SelectTargetType) asks a panel whether the player has the required inventory.
+ * ActivateItem.HasRequiredInventory is not simulated: on clients, where panels are proxies, it was not executed and returned false,
+ * so clients could never target a panel (bacta dispensers, hacking, explosives). Same code, but simulated.
+ */
+simulated function bool ActivateItemHasRequiredInventory(Pawn P)
+{
+	local ActivateItem Item;
+	local Ammunition AmmoType;
+
+	Item = ActivateItem(HasRequiredInventoryOverride.CurrentSelf);
+
+	if(Item.AmmunitionRequired == None)
+		return true;
+
+	if(P == None)
+		return false;
+
+	AmmoType = Ammunition(P.FindInventoryType(Item.AmmunitionRequired));
+
+	return AmmoType != None && AmmoType.AmmoAmount > 0;
 }
 
 function string RedirectMenuClass(string MenuClassName)

@@ -7,7 +7,7 @@ class CoopConfig extends Object config(ModCoop);
  */
 
 // Mod version. Every player must have the same build (the package GUIDs must match), so increase this with every release.
-const MOD_VERSION = "0.4";
+const MOD_VERSION = "0.5";
 
 var config string        RecentAddresses[5]; // Most recent first. A static array because the config writer of RC comments out dynamic arrays.
 var config array<string> CoopLevels;       // Levels that can be selected in the host menu. Remove a level here to disable it.
