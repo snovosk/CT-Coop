@@ -12,6 +12,8 @@ class CoopExtension extends SWRCFixExtension;
 
 var FunctionOverride ConnectionFailedInitOverride;
 var FunctionOverride DisconnectOnYesOverride;
+var FunctionOverride PlayJumpOverride;
+var FunctionOverride PlayFallingOverride;
 
 function Init(SWRCFix Fix)
 {
@@ -29,6 +31,58 @@ function Init(SWRCFix Fix)
 
 	DisconnectOnYesOverride = new class'FunctionOverride';
 	DisconnectOnYesOverride.Init(class'MenuDisconnect', 'OnYes', self, 'DisconnectOnYes');
+
+	PlayJumpOverride = new class'FunctionOverride';
+	PlayJumpOverride.Init(class'Pawn', 'PlayJump', self, 'PawnPlayJump');
+
+	PlayFallingOverride = new class'FunctionOverride';
+	PlayFallingOverride.Init(class'Pawn', 'PlayFalling', self, 'PawnPlayFalling');
+}
+
+/*
+ * Jump animations of other players.
+ * Pawn.PlayJump does nothing and the native animation code of the single player commando keeps the standing pose while falling:
+ * a jumping player was seen frozen upright in the air by everyone else. In single player you never see yourself from the outside
+ * so it didn't matter. The commando mesh has the Jump and FallBreathe animations, they are played for players that are not
+ * controlled locally. Called on the server for clients' pawns and on clients for simulated proxies.
+ */
+simulated function bool UseMPJumpAnims(Pawn P)
+{
+	return PlayerCommando(P) != None && P.Level.NetMode != NM_Standalone && !P.IsLocallyControlled() && P.HasAnim('Jump');
+}
+
+simulated function PawnPlayJump()
+{
+	local Pawn P;
+
+	P = Pawn(PlayJumpOverride.CurrentSelf);
+
+	// Pawn.PlayJump itself does nothing
+	if(UseMPJumpAnims(P))
+		P.PlayAnim('Jump', , , , 3);
+}
+
+simulated function PawnPlayFalling()
+{
+	local Pawn P;
+
+	P = Pawn(PlayFallingOverride.CurrentSelf);
+
+	if(UseMPJumpAnims(P))
+	{
+		if(P.HasAnim('FallBreathe'))
+			P.LoopAnim('FallBreathe');
+		else if(!P.IsPlayingAnim('Jump'))
+			P.PlayAnim('Jump', , , , 3);
+
+		return;
+	}
+
+	// Same as Pawn.PlayFalling (calling it here would run overrides of subclasses twice)
+	if(P.HasAnim('FallBreathe'))
+		P.LoopAnim('FallBreathe');
+	else
+		P.PlayBreathe();
 }
 
 function string RedirectMenuClass(string MenuClassName)

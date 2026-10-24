@@ -562,6 +562,7 @@ function TickTest()
 	local PlayerController Host;
 	local Controller C;
 	local string NextMap;
+	local rotator R;
 
 	if(Level.TimeSeconds < TestTime)
 		return;
@@ -655,6 +656,76 @@ function TickTest()
 		TestTime = Level.TimeSeconds + 1;
 		++TestStep;
 		return;
+	}
+	else if(TestAction ~= "jump")
+	{
+		// Clients jump in front of the host so the animation of a remote player can be watched in the host's window
+		for(C = Level.ControllerList; C != None; C = C.nextController)
+		{
+			if(CoopPlayer(C) != None && !IsHost(C) && C.Pawn != None)
+			{
+				if(TestStep == 0)
+				{
+					// In front of the host, far enough to see the whole model
+					R = Host.Pawn.Rotation;
+					R.Pitch = 0;
+					C.Pawn.SetLocation(Host.Pawn.Location + vector(R) * 400);
+					C.Pawn.SetPhysics(PHYS_Falling);
+				}
+
+				Host.SetRotation(rotator(C.Pawn.Location - (Host.Pawn.Location + Host.Pawn.EyePosition())));
+
+				if(TestStep > 0 && C.Pawn.Physics == PHYS_Walking)
+				{
+					Log("CoopTest: Jump " $ C.Pawn);
+					C.Pawn.DoJump(false);
+				}
+			}
+		}
+
+		if(TestStep < 8)
+		{
+			TestTime = Level.TimeSeconds + 2;
+			++TestStep;
+			return;
+		}
+	}
+	else if(TestAction ~= "hostjump")
+	{
+		// The host jumps in front of a client so the animation of a simulated proxy can be watched in the client's window
+		for(C = Level.ControllerList; C != None; C = C.nextController)
+		{
+			if(CoopPlayer(C) != None && !IsHost(C) && C.Pawn != None)
+			{
+				if(TestStep == 0)
+				{
+					// Same spot as in the jump test which is known to be free
+					R = Host.Pawn.Rotation;
+					R.Pitch = 0;
+					C.Pawn.SetLocation(Host.Pawn.Location + vector(R) * 400);
+					C.Pawn.SetPhysics(PHYS_Falling);
+				}
+
+				R = rotator(Host.Pawn.Location - C.Pawn.Location);
+				R.Pitch = 0;
+				C.ClientSetRotation(R);
+
+				if(TestStep > 0 && Host.Pawn.Physics == PHYS_Walking)
+				{
+					Log("CoopTest: Jump " $ Host.Pawn);
+					Host.Pawn.DoJump(false);
+				}
+
+				break;
+			}
+		}
+
+		if(TestStep < 8)
+		{
+			TestTime = Level.TimeSeconds + 2;
+			++TestStep;
+			return;
+		}
 	}
 	else if(TestAction ~= "hostdown")
 	{
