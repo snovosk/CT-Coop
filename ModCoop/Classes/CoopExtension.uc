@@ -22,6 +22,7 @@ function Init(SWRCFix Fix)
 	Log("ModCoop version " $ class'CoopConfig'.static.Version());
 	class'CoopNative'.static.InstallClientFixes();
 	class'CoopNative'.static.LoadSavedConfig(class'CoopConfig', "ModCoop.ini");
+	class'CoopConfig'.static.LoadLists();
 	class'CoopNative'.static.LoadSavedConfig(class'CoopGame', "ModCoop.ini");
 
 	// Coop server started from the command line (e.g. the host batch file). The package must be added before the server starts listening.

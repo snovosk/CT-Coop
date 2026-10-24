@@ -22,7 +22,6 @@ var() config float CatchUpDelay;
 var() config float HostReviveWaitTime;    // Seconds a downed host waits for a client to revive him when the whole squad is down (0 = single player behavior)
 var() config bool  bClientsTakeOverSquad; // Clients take over squad members (see CheckSquadTakeover)
 var() config float TakeOverDistance;
-var() config string SquadAssignments[8];  // "<player key>=<squad member class>": which client plays which squad member (see PlayerKey)
 var() config float MaxSpawnWait;          // Seconds a client waits for the host to be free (see IsHostFree) before it is spawned anyway
 
 var CoopFixes Fixes;
@@ -61,6 +60,15 @@ struct SentPanelState
 	var Pawn User;
 };
 var array<SentPanelState> SentPanelStates;
+
+// See SyncMapActorCollision
+struct CollisionState
+{
+	var Actor A;
+	var byte Flags;
+	var StaticMesh Mesh;
+};
+var array<CollisionState> CollisionActors;
 var float NextIdleStateSync;
 var float NextIdleStateResend;
 
@@ -489,7 +497,8 @@ function Timer()
 		SendMapActorDisplay(CP);
 
 		// After a takeover the new inventory may arrive on the client after it tried to switch to it (see TakeOver)
-		if(CP.Pawn != None && CoopCommando(CP.Pawn) == None && CP.Pawn.Weapon == None && CP.Pawn.Health > 0 && !CP.Pawn.bIncapacitated)
+		if(CP.Pawn != None && CoopCommando(CP.Pawn) == None && CP.Pawn.Weapon == None && CP.Pawn.Health > 0 && !CP.Pawn.bIncapacitated &&
+		   Level.TimeSeconds - CP.TakeoverTime < 10)
 			CP.ClientSwitchToBestWeapon();
 	}
 }
@@ -551,6 +560,8 @@ event Tick(float DeltaTime)
 		NextIdleStateSync = Level.TimeSeconds + 0.2;
 		SyncIdleStates(Level.TimeSeconds >= NextIdleStateResend);
 		SyncPanelStates(Level.TimeSeconds >= NextIdleStateResend);
+		SyncMapActorCollision();
+		CheckDetonations();
 
 		if(Level.TimeSeconds >= NextIdleStateResend)
 			NextIdleStateResend = Level.TimeSeconds + 3.0;
@@ -667,6 +678,16 @@ function SyncPanelStates(bool bResendAll)
 		}
 
 		// E.g. an armed demolition charge becomes a plunger (AIT_Plunger) for the player that placed it
+		// Progress bars and timers while something is being set up or counts down
+		if(Item.bActivating || (Item.bActivated && Item.DurationRemaining > 0))
+		{
+			for(C = Level.ControllerList; C != None; C = C.nextController)
+			{
+				if(CoopPlayer(C) != None && !IsHost(C))
+					CoopPlayer(C).ClientCoopSetPanelProgress(Item, Item.FractionComplete, Item.DurationRemaining, Item.ElapseSetupTime);
+			}
+		}
+
 		if(SentPanelStates[i].Flags != Flags || SentPanelStates[i].ItemType != Item.ActivateItemType || SentPanelStates[i].User != UserPawn || bResendAll)
 		{
 			SentPanelStates[i].Flags = Flags;
@@ -678,6 +699,81 @@ function SyncPanelStates(bool bResendAll)
 				if(CoopPlayer(C) != None && !IsHost(C))
 					CoopPlayer(C).ClientCoopSetPanelState(Item, Flags, Item.ActivateItemType, UserPawn);
 			}
+		}
+	}
+}
+
+// See CoopPlayer.ServerCoopStartHandSignal
+function CheckDetonations()
+{
+	local Controller C;
+	local CoopPlayer CP;
+
+	for(C = Level.ControllerList; C != None; C = C.nextController)
+	{
+		CP = CoopPlayer(C);
+
+		if(CP != None && CP.PendingDetonation != None && Level.TimeSeconds >= CP.DetonationTime)
+		{
+			if(!CP.PendingDetonation.bDeleteMe && CP.PendingDetonation.ActivateItemType == AIT_Plunger)
+				CP.PendingDetonation.GotoState('Explode');
+
+			CP.PendingDetonation = None;
+		}
+	}
+}
+
+/*
+ * Destroyed props switch off their collision and change their mesh on the server (Prop.PropDestroyed). The replicated flags don't
+ * update the collision on clients: they bumped into invisible walls where objects had been. Changes are sent to the clients which
+ * apply them properly (SetCollision, SetStaticMesh).
+ */
+function SyncMapActorCollision()
+{
+	local int i;
+	local byte Flags;
+	local Actor A;
+	local Controller C;
+
+	for(i = 0; i < CollisionActors.Length; ++i)
+	{
+		A = CollisionActors[i].A;
+
+		if(A == None || A.bDeleteMe)
+			continue;
+
+		Flags = 0;
+
+		if(A.bCollideActors)
+			Flags = Flags | 1;
+
+		if(A.bBlockActors)
+			Flags = Flags | 2;
+
+		if(A.bBlockPlayers)
+			Flags = Flags | 4;
+
+		if(A.bHidden)
+			Flags = Flags | 8;
+
+		if(Flags == CollisionActors[i].Flags && A.StaticMesh == CollisionActors[i].Mesh)
+			continue;
+
+		// The first time only remember the state: clients get the initial state with the actor itself
+		if(CollisionActors[i].Flags == 255)
+		{
+			CollisionActors[i].Flags = Flags;
+			CollisionActors[i].Mesh = A.StaticMesh;
+			continue;
+		}
+
+		CollisionActors[i].Flags = Flags;
+		CollisionActors[i].Mesh = A.StaticMesh;
+
+		for(C = Level.ControllerList; C != None; C = C.nextController)
+		{
+			if(CoopPlayer(C) != None && !IsHost(C))
+				CoopPlayer(C).ClientCoopSetActorCollision(A, A.bCollideActors, A.bBlockActors, A.bBlockPlayers, A.StaticMesh, A.bHidden);
 		}
 	}
 }
@@ -767,11 +863,19 @@ function MakeMapActorsRelevant()
 
 	foreach AllActors(class'Actor', A)
 	{
-		if(A.DrawType == DT_StaticMesh && !A.bStatic && !A.bAlwaysRelevant && !A.bOnlyRelevantToOwner && A.RemoteRole != ROLE_None &&
-		   Pawn(A) == None && A.Owner == None)
+		if(A.DrawType == DT_StaticMesh && !A.bStatic && !A.bOnlyRelevantToOwner && A.RemoteRole != ROLE_None && Pawn(A) == None && A.Owner == None)
 		{
-			A.bAlwaysRelevant = true;
-			++Num;
+			if(!A.bAlwaysRelevant)
+			{
+				A.bAlwaysRelevant = true;
+				++Num;
+			}
+
+			i = CollisionActors.Length;
+			CollisionActors.Length = i + 1;
+			CollisionActors[i].A = A;
+			CollisionActors[i].Flags = 255; // Not known yet (see SyncMapActorCollision)
+			CollisionActors[i].Mesh = A.StaticMesh;
 
 			if(A.DrawScale3D != A.default.DrawScale3D || A.PrePivot != A.default.PrePivot || A.Skins.Length > 0)
 				SyncedMapActors[SyncedMapActors.Length] = A;
@@ -1381,8 +1485,9 @@ function TickTest()
 
 			if(C == None || TestPanel == None)
 			{
+				// The client may still wait for Scorch
 				Log("CoopTest: door: no Scorch client (" $ C $ ") or no charge (" $ TestPanel $ ")");
-				TestAction = "";
+				TestTime = Level.TimeSeconds + 2;
 				return;
 			}
 
@@ -1392,6 +1497,7 @@ function TickTest()
 			R = rotator(TestPanel.Location - C.Pawn.Location);
 			R.Pitch = 0;
 			C.ClientSetRotation(R);
+			Log("CoopTest: door: moved " $ C.PlayerReplicationInfo.PlayerName $ " to " $ C.Pawn.Location);
 			C.bGodMode = true;
 			Host.Pawn.SetLocation(TestPanel.Location + vector(TestPanel.Rotation) * 300 + vect(0,0,-60));
 
@@ -1719,11 +1825,12 @@ function StartWatching(CoopPlayer CP, Pawn P, bool bMoveCamera)
 	if(bMoveCamera && CP.Pawn != None)
 		CP.ClientCoopTakeoverCamera(CP.Pawn.Location + CP.Pawn.EyePosition(), CP.Rotation);
 
+	// From behind: the squad member's eyes often look at a wall during its scene
 	CP.WatchedMember = P;
 	CP.SetViewTarget(P);
 	CP.ClientSetViewTarget(P);
-	CP.bBehindView = false;
-	CP.ClientSetBehindView(false);
+	CP.bBehindView = true;
+	CP.ClientSetBehindView(true);
 	CP.GotoState('CoopWatching');
 	CP.ClientGotoState('CoopWatching', '');
 
@@ -1836,45 +1943,15 @@ function string PlayerKey(PlayerController PC)
 	return Address $ "/" $ PC.PlayerReplicationInfo.PlayerName;
 }
 
+// Which client plays which squad member is saved in CoopConfig.SquadAssignmentList
 function string GetAssignedClass(PlayerController PC)
 {
-	local int i;
-	local string Key;
-
-	Key = PlayerKey(PC) $ "=";
-
-	for(i = 0; i < ArrayCount(SquadAssignments); ++i)
-	{
-		if(Left(SquadAssignments[i], Len(Key)) == Key)
-			return Mid(SquadAssignments[i], Len(Key));
-	}
-
-	return "";
+	return class'CoopConfig'.static.GetSquadAssignment(PlayerKey(PC));
 }
 
 function SetAssignment(PlayerController PC, string MemberClass)
 {
-	local int i, Free;
-	local string Key;
-
-	Key = PlayerKey(PC) $ "=";
-	Free = -1;
-
-	for(i = 0; i < ArrayCount(SquadAssignments); ++i)
-	{
-		// The member belonged to someone else (who is not connected, see FindAssignedPlayer) or this client had another one
-		if(Mid(SquadAssignments[i], InStr(SquadAssignments[i], "=") + 1) ~= MemberClass || Left(SquadAssignments[i], Len(Key)) == Key)
-			SquadAssignments[i] = "";
-
-		if(SquadAssignments[i] == "" && Free == -1)
-			Free = i;
-	}
-
-	if(Free == -1)
-		Free = 0;
-
-	SquadAssignments[Free] = Key $ MemberClass;
-	SaveConfig();
+	class'CoopConfig'.static.SetSquadAssignment(PlayerKey(PC), MemberClass);
 	Log("CoopGame: " $ PlayerKey(PC) $ " plays " $ MemberClass $ " from now on");
 }
 
@@ -1961,9 +2038,17 @@ function TakeOver(CoopPlayer CP, Pawn P, bool bMoveCamera)
 	CP.bCoopTakeover = true;
 	CP.Possess(P);
 	CP.bCoopTakeover = false;
+	CP.bBehindView = false;
+	CP.ClientSetBehindView(false);
+
+	// Scripts crouch or hurt squad members (Fixer is hurt in his scene): a player starts standing and healthy
+	P.ShouldCrouch(false);
+	P.bWantsToCrouch = false;
+	P.Health = Max(P.Health, P.default.Health);
 	CP.ClientSetRotation(P.Rotation);
 	CP.IncapacitatedTime = 0;
 	CP.DeadTime = 0;
+	CP.TakeoverTime = Level.TimeSeconds;
 
 	// The AI's weapons have no first person view and it lacks the bacta healer and hand signals: player equipment instead
 	while(P.Inventory != None)

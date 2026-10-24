@@ -27,15 +27,21 @@ var vector      TakeoverFromLocation; // Client only: camera flight to a taken o
 var rotator     TakeoverFromRotation;
 var float       TakeoverStartTime;
 var bool        bCoopHUDHidden, bWasHUDHidden, bWasHelmetDrawn; // See SetCoopHUDHidden
-var Pawn        WatchedMember;   // Server only: squad member whose scene this client watches before playing it (see CoopGame.CheckSceneWatch)
+var Pawn        WatchedMember;
+var float       TakeoverTime;    // Server only: Level.TimeSeconds of the last takeover (see CoopGame.TakeOver)
+var float       HandSignalIdleTime;   // Client only: see FixHandSignalWeapon
+var bool        bPlayedHandSignalAnim;
+var Actor       ClientAttachItem;     // Client only: item in the hand during a hand signal (see SetupClientHandSignal)
+var ActivateItem PendingDetonation;   // Server only: charge a client detonates when its hand animation is done (CoopGame.Tick)
+var float       DetonationTime;   // Server only: squad member whose scene this client watches before playing it (see CoopGame.CheckSceneWatch)
 var float       WeaponDownTime; // Client only: Level.TimeSeconds since when the weapon is down without being changed
 
 replication
 {
 	reliable if(Role == ROLE_Authority)
-		ClientCoopMessage, ClientCoopPawnRevived, ClientCoopSetIncapacitated, ClientCoopSetIdleState, ClientCoopSetPanelState, ClientCoopTakeoverCamera;
+		ClientCoopMessage, ClientCoopPawnRevived, ClientCoopSetIncapacitated, ClientCoopSetIdleState, ClientCoopSetPanelState, ClientCoopTakeoverCamera, ClientCoopSetActorCollision;
 	unreliable if(Role == ROLE_Authority)
-		ClientCoopSetActorDisplay, ClientCoopSetPanelLinks;
+		ClientCoopSetActorDisplay, ClientCoopSetPanelLinks, ClientCoopSetPanelProgress;
 	reliable if(Role < ROLE_Authority)
 		ServerTeleportToHost, ServerCoopSetTarget, ServerCoopUsingItem, ServerCoopUsePanel, ServerCoopStartHandSignal;
 }
@@ -66,7 +72,11 @@ simulated function SetCoopNetSpeed()
 	bSetCoopNetSpeed = true;
 	bDynamicNetSpeed = false;
 	Log("ModCoop: Net speed " $ Player.CurrentNetSpeed $ ", requesting " $ class'CoopConfig'.default.NetClientRate);
+
+	// SetNetSpeed is limited by MaxClientRate of the client's own net driver (10000 in System.ini)
+	class'CoopNative'.static.SetNetRates(class'CoopConfig'.default.NetClientRate, class'CoopConfig'.default.NetTickRate);
 	SetNetSpeed(class'CoopConfig'.default.NetClientRate);
+	Log("ModCoop: Net speed is now " $ Player.CurrentNetSpeed);
 }
 
 // See CoopGame.MakeMapActorsRelevant. Item is None if it does not exist on this client yet, it is sent again later.
@@ -212,6 +222,85 @@ simulated function ApplyHostSkin()
 	}
 }
 
+/*
+ * HandSignal (the hands used for panels, demolition charges and the detonator) switches back to the previous weapon in Idle.Tick,
+ * which only runs on the server: a client kept empty hands after using a panel. Same condition as HandSignal.Idle.Tick.
+ */
+simulated function FixHandSignalWeapon(float DeltaTime)
+{
+	// The hands wait in Active for the end of their animation, which isn't started on clients: play it (the detonator, placing a
+	// charge...), then go on to Idle
+	if(Pawn != None && Pawn.Weapon != None && Pawn.Weapon.WeaponType == WT_Marker && Pawn.Weapon.IsInState('Active') && !Pawn.Weapon.IsAnimating())
+	{
+		HandSignalIdleTime += DeltaTime;
+
+		if(HandSignalIdleTime < 0.2)
+			return;
+
+		if(!bPlayedHandSignalAnim && Pawn.Weapon.LoadAnim != '' && Pawn.Weapon.HasAnim(Pawn.Weapon.LoadAnim))
+		{
+			bPlayedHandSignalAnim = true;
+			Pawn.Weapon.PlayAnim(Pawn.Weapon.LoadAnim);
+		}
+		else
+		{
+			bPlayedHandSignalAnim = false;
+			Pawn.Weapon.GotoState('Idle');
+		}
+
+		HandSignalIdleTime = 0;
+		return;
+	}
+
+	if(Pawn == None || Pawn.Weapon == None || Pawn.Weapon.WeaponType != WT_Marker || !Pawn.Weapon.IsInState('Active'))
+		bPlayedHandSignalAnim = false;
+
+	if(Pawn == None || Pawn.Weapon == None || Pawn.Weapon.WeaponType != WT_Marker || !Pawn.Weapon.IsInState('Idle') ||
+	   (Pawn.Weapon.FireAnim != '' && (TargetType == TGT_Panel || TargetType == TGT_DemolitionReady)))
+	{
+		HandSignalIdleTime = 0;
+
+		// The item stays in the hand while the hands are used
+		if(Pawn == None || Pawn.Weapon == None || Pawn.Weapon.WeaponType != WT_Marker || Pawn.Weapon.IsInState('DownWeapon'))
+			DestroyClientAttachItem();
+
+		return;
+	}
+
+	HandSignalIdleTime += DeltaTime;
+
+	if(HandSignalIdleTime < 0.5)
+		return;
+
+	HandSignalIdleTime = 0;
+	DestroyClientAttachItem();
+
+	if(Pawn.OldWeapon != None && Pawn.OldWeapon.WeaponType != WT_Marker)
+		Pawn.SwitchToLastWeapon();
+	else
+		SwitchWeapon(1);
+}
+
+/*
+ * The headlamp is also used by the visor modes (night vision). PlayerCommando spawns it on the server, squad members taken over
+ * by a client have none on the client (CoopCommando does the same in PostNetBeginPlay).
+ */
+simulated function EnsureHeadlamp()
+{
+	if(Pawn == None || Pawn.Flashlight != None || CoopCommando(Pawn) != None || !Pawn.IsA('CloneCommando'))
+		return;
+
+	Pawn.Flashlight = Pawn.Spawn(class'CloneHeadlamp', Pawn);
+
+	if(Pawn.Flashlight != None)
+	{
+		Pawn.AttachToBone(Pawn.Flashlight, 'lightAttach');
+		Pawn.Flashlight.SetRelativeLocation(vect(0,0,0));
+		Pawn.Flashlight.SetRelativeRotation(rot(0,0,0));
+		Log("ModCoop: Created client side headlamp for " $ Pawn);
+	}
+}
+
 simulated function FixStuckWeapon()
 {
 	local Weapon W;
@@ -279,6 +368,8 @@ event PlayerTick(float DeltaTime)
 
 		EnsureClientTeams();
 		FixStuckWeapon();
+		FixHandSignalWeapon(DeltaTime);
+		EnsureHeadlamp();
 
 		if(Level.TimeSeconds >= NextHostSkinCheck)
 		{
@@ -381,8 +472,116 @@ exec function Use()
 	Super.Use();
 }
 
+/*
+ * HandSignal.MarkerHandSetup chooses the hand animations (demolition charge, detonator, bacta, keypad...) and the item in the hand,
+ * but only on the server. Clients played the default animations without the item. Same choice for panels on the client.
+ */
+simulated function SetupClientHandSignal(ETargetType NewType, Actor NewTarget, SquadMarker NewMarker)
+{
+	local Weapon Hands;
+	local ActivateItem Item;
+	local class<Actor> AttachClass;
+	local name LoadAnim, FireAnim, HolsterAnim;
+
+	Hands = Weapon(Pawn.FindInventoryType(class<Inventory>(DynamicLoadObject("CTInventory.HandSignal", class'Class'))));
+
+	if(Hands == None)
+		return;
+
+	Item = ActivateItem(NewTarget);
+
+	if(Item == None && NewMarker != None)
+		Item = ActivateItem(NewMarker.Anchor);
+
+	if(Item == None)
+		return;
+
+	HolsterAnim = 'Holster';
+
+	switch(Item.ActivateItemType)
+	{
+	case AIT_BactaDispenser:
+		LoadAnim = 'BactaLoad';
+		FireAnim = 'BactaLoop';
+		HolsterAnim = 'BactaHolster';
+		break;
+	case AIT_BreachDoor:
+		LoadAnim = 'SetDoorCharge';
+		FireAnim = 'StartDoorCharge';
+		AttachClass = Item.AttachItemClass;
+		break;
+	case AIT_Demolition:
+		FireAnim = 'KeypadLoop';
+
+		if(!Item.bActivated && !Item.bActivating)
+		{
+			LoadAnim = 'SetDemolition';
+			AttachClass = Item.AttachItemClass;
+		}
+		else
+		{
+			LoadAnim = 'Load';
+		}
+		break;
+	case AIT_Plunger:
+		LoadAnim = 'Detonate';
+		AttachClass = class<Actor>(DynamicLoadObject("CTInventory.DemolitionPlungerObject", class'Class', true));
+		break;
+	case AIT_ProximityMine:
+		if(!Item.bActivated && !Item.bActivating)
+		{
+			LoadAnim = 'SetProxMine';
+			AttachClass = Item.AttachItemClass;
+		}
+		else
+		{
+			LoadAnim = 'Load';
+		}
+		break;
+	case AIT_DisarmTrap:
+	case AIT_HackTerminal:
+		LoadAnim = 'KeypadLoad';
+		FireAnim = 'KeypadLoop';
+		HolsterAnim = 'KeypadHolster';
+		break;
+	default:
+		LoadAnim = 'Load';
+		FireAnim = 'KeypadLoop';
+	}
+
+	Hands.LoadAnim = LoadAnim;
+	Hands.FireAnim = FireAnim;
+	Hands.HolsterAnim = HolsterAnim;
+
+	DestroyClientAttachItem();
+
+	if(AttachClass != None)
+	{
+		ClientAttachItem = Hands.Spawn(AttachClass, Hands,, Hands.GetBoneLocation('weaponAttach_L'));
+
+		if(ClientAttachItem != None)
+		{
+			Hands.AttachToBone(ClientAttachItem, 'weaponAttach_L');
+			ClientAttachItem.SetRelativeLocation(vect(0,0,0));
+			ClientAttachItem.SetRelativeRotation(rot(0,0,0));
+		}
+	}
+}
+
+simulated function DestroyClientAttachItem()
+{
+	if(ClientAttachItem != None)
+	{
+		ClientAttachItem.Destroy();
+		ClientAttachItem = None;
+	}
+}
+
 function StartHandSignal()
 {
+	if(Role < ROLE_Authority && Pawn != None)
+		SetupClientHandSignal(TargetType, Target, TargetMarker);
+
 	Super.StartHandSignal();
 
 	if(Role < ROLE_Authority)
@@ -440,8 +639,10 @@ function ServerCoopStartHandSignal(ETargetType NewType, Actor NewTarget, SquadMa
 
 		if(Item != None && Item.ActivateItemType == AIT_Plunger && Item.bActivated)
 		{
+			// After the 'Detonate' animation of the hands (see CoopGame.Tick)
 			Log("ModCoop: " $ PlayerReplicationInfo.PlayerName $ " detonates " $ Item);
-			Item.GotoState('Explode');
+			PendingDetonation = Item;
+			DetonationTime = Level.TimeSeconds + 1.0;
 		}
 	}
 }
@@ -521,6 +722,30 @@ event PlayerCalcView(out actor ViewActor, out vector CameraLocation, out rotator
 	Alpha = Alpha * Alpha * (3 - 2 * Alpha);
 	CameraLocation = TakeoverFromLocation + (CameraLocation - TakeoverFromLocation) * Alpha + vect(0,0,150) * Sin(Alpha * Pi);
 	CameraRotation = TakeoverFromRotation + Normalize(CameraRotation - TakeoverFromRotation) * Alpha;
+}
+
+// See CoopGame.SyncPanelStates: progress of planting a charge, hacking etc. shown by the HUD
+simulated function ClientCoopSetPanelProgress(ActivateItem Item, float FractionComplete, float DurationRemaining, float ElapseSetupTime)
+{
+	if(Item == None || Item.Role == ROLE_Authority)
+		return;
+
+	Item.FractionComplete = FractionComplete;
+	Item.DurationRemaining = DurationRemaining;
+	Item.ElapseSetupTime = ElapseSetupTime;
+}
+
+// See CoopGame.SyncMapActorCollision
+simulated function ClientCoopSetActorCollision(Actor A, bool bCollide, bool bBlockActors, bool bBlockPlayers, StaticMesh NewMesh, bool bNewHidden)
+{
+	if(A == None || A.Role == ROLE_Authority)
+		return;
+
+	if(NewMesh != None && A.StaticMesh != NewMesh)
+		A.SetStaticMesh(NewMesh);
+
+	A.SetCollision(bCollide, bBlockActors, bBlockPlayers);
+	A.bHidden = bNewHidden;
 }
 
 // See CoopGame.SyncPanelStates
@@ -713,6 +938,7 @@ state CoopWatching
 
 		// The client's own health, ammo and visor don't belong to the squad member it watches
 		SetCoopHUDHidden(true);
+		DestroyClientAttachItem();
 	}
 
 	function EndState()
@@ -768,6 +994,9 @@ state UsingItem
 			GotoState('PlayerWalking');
 			return;
 		}
+
+		if(Level.NetMode == NM_Client)
+			FixHandSignalWeapon(DeltaTime);
 
 		Super.PlayerTick(DeltaTime);
 	}

@@ -7,9 +7,13 @@ class CoopConfig extends Object config(ModCoop);
  */
 
 // Mod version. Every player must have the same build (the package GUIDs must match), so increase this with every release.
-const MOD_VERSION = "0.5";
+const MOD_VERSION = "0.55";
 
-var config string        RecentAddresses[5]; // Most recent first. A static array because the config writer of RC comments out dynamic arrays.
+var string               RecentAddresses[5]; // Most recent first, loaded from RecentAddressList (see LoadLists)
+// Lists are saved as one string: the config writer of RC comments out dynamic arrays and also elements of static arrays that were
+// loaded from the file, so they were lost after a restart
+var config string        RecentAddressList;      // "address|address|..."
+var config string        SquadAssignmentList;    // "<player key>=<squad member class>|...", see CoopGame.PlayerKey
 var config array<string> CoopLevels;       // Levels that can be selected in the host menu. Remove a level here to disable it.
 var config int           LastLevelIndex;
 var config int           LastMaxPlayers;
@@ -51,6 +55,95 @@ static function AddRecentAddress(string Address)
 		default.RecentAddresses[i] = default.RecentAddresses[i - 1];
 
 	default.RecentAddresses[0] = Address;
+	default.RecentAddressList = "";
+
+	for(i = 0; i < ArrayCount(default.RecentAddresses); ++i)
+	{
+		if(default.RecentAddresses[i] != "")
+			default.RecentAddressList = default.RecentAddressList $ default.RecentAddresses[i] $ "|";
+	}
+
+	StaticSaveConfig();
+}
+
+// Called after the config was loaded (CoopExtension.Init)
+static function LoadLists()
+{
+	local string List;
+	local int i;
+
+	List = default.RecentAddressList;
+
+	for(i = 0; i < ArrayCount(default.RecentAddresses); ++i)
+	{
+		default.RecentAddresses[i] = "";
+
+		if(InStr(List, "|") != -1)
+		{
+			default.RecentAddresses[i] = Left(List, InStr(List, "|"));
+			List = Mid(List, InStr(List, "|") + 1);
+		}
+		else if(List != "")
+		{
+			default.RecentAddresses[i] = List;
+			List = "";
+		}
+	}
+}
+
+// Squad member class a player played before, empty if none
+static function string GetSquadAssignment(string Key)
+{
+	local string List, Entry;
+
+	List = default.SquadAssignmentList;
+
+	while(List != "")
+	{
+		if(InStr(List, "|") != -1)
+		{
+			Entry = Left(List, InStr(List, "|"));
+			List = Mid(List, InStr(List, "|") + 1);
+		}
+		else
+		{
+			Entry = List;
+			List = "";
+		}
+
+		if(Left(Entry, Len(Key) + 1) == (Key $ "="))
+			return Mid(Entry, Len(Key) + 1);
+	}
+
+	return "";
+}
+
+// The player plays this squad member from now on. Earlier entries of the player and of the squad member are removed.
+static function SetSquadAssignment(string Key, string MemberClass)
+{
+	local string List, Entry, NewList;
+
+	List = default.SquadAssignmentList;
+	NewList = "";
+
+	while(List != "")
+	{
+		if(InStr(List, "|") != -1)
+		{
+			Entry = Left(List, InStr(List, "|"));
+			List = Mid(List, InStr(List, "|") + 1);
+		}
+		else
+		{
+			Entry = List;
+			List = "";
+		}
+
+		if(Entry != "" && Left(Entry, Len(Key) + 1) != (Key $ "=") && !(Mid(Entry, InStr(Entry, "=") + 1) ~= MemberClass))
+			NewList = NewList $ Entry $ "|";
+	}
+
+	default.SquadAssignmentList = NewList $ Key $ "=" $ MemberClass $ "|";
 	StaticSaveConfig();
 }
 

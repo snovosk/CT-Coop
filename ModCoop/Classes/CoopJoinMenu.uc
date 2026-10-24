@@ -168,7 +168,7 @@ simulated function HandleInputBack()
 
 defaultproperties
 {
-	MenuTitle=(Text="CO-OP CAMPAIGN: JOIN (MOD 0.5)",bHidden=0)
+	MenuTitle=(Text="CO-OP CAMPAIGN: JOIN (MOD 0.55)",bHidden=0)
 	LabelBackground=(WidgetTexture=Texture'GUIContent.Menu.CT_ButtonDefault',DrawColor=(B=192,G=192,R=192,A=128),DrawPivot=DP_MiddleMiddle,PosX=0.5,PosY=0.25,ScaleX=0.365,ScaleY=0.04333,ScaleMode=MSCM_FitStretch)
 	Label=(MenuFont=Font'OrbitFonts.OrbitBold15',Text="HOST IP ADDRESS",DrawColor=(B=192,G=192,R=192,A=255),DrawPivot=DP_MiddleMiddle,PosX=0.5,PosY=0.25,ScaleY=0.8)
 	AddressBox=(MaxLength=40,bNoSpaces=1,Blurred=(MenuFont=Font'OrbitFonts.OrbitBold15',DrawColor=(B=255,G=200,R=120,A=255),DrawPivot=DP_MiddleMiddle,PosX=0.5,PosY=0.33,ScaleX=1,ScaleY=0.8),BackgroundBlurred=(WidgetTexture=Texture'GUIContent.Menu.CT_DisplayBox',DrawColor=(B=255,G=255,R=255,A=192),DrawPivot=DP_MiddleMiddle,PosX=0.5,PosY=0.33,ScaleX=0.5,ScaleY=0.04333,ScaleMode=MSCM_FitStretch),OnSelect="OnAButton")
