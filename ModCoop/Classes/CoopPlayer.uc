@@ -28,7 +28,22 @@ var rotator     TakeoverFromRotation;
 var float       TakeoverStartTime;
 var bool        bCoopHUDHidden, bWasHUDHidden, bWasHelmetDrawn; // See SetCoopHUDHidden
 var Pawn        WatchedMember;
+var Pawn        WatchHiddenPawn;      // Client only: watched squad member hidden while its scene is seen through its eyes (see PlayerCalcView)
+var array<Actor> WatchHiddenActors;
+var vector      WatchCameraLocation;
+var rotator     WatchCameraRotation;
+var float       WatchCameraTime;
 var float       TakeoverTime;    // Server only: Level.TimeSeconds of the last takeover (see CoopGame.TakeOver)
+// See SmoothProxies
+struct SmoothedPawn
+{
+	var Pawn P;
+	var vector LastLocation;
+	var vector LastVelocity;
+	var vector Offset;
+	var vector BasePrePivot;
+};
+var array<SmoothedPawn> SmoothedPawns;
 var float       HandSignalIdleTime;   // Client only: see FixHandSignalWeapon
 var bool        bPlayedHandSignalAnim;
 var Actor       ClientAttachItem;     // Client only: item in the hand during a hand signal (see SetupClientHandSignal)
@@ -69,6 +84,9 @@ simulated event PostNetBeginPlay()
 // See CoopConfig.NetClientRate. The server limits it to its own setting. Not saved to the config.
 simulated function SetCoopNetSpeed()
 {
+	local string CommandLine;
+	local int Lag;
+
 	bSetCoopNetSpeed = true;
 	bDynamicNetSpeed = false;
 	Log("ModCoop: Net speed " $ Player.CurrentNetSpeed $ ", requesting " $ class'CoopConfig'.default.NetClientRate);
@@ -77,6 +95,15 @@ simulated function SetCoopNetSpeed()
 	class'CoopNative'.static.SetNetRates(class'CoopConfig'.default.NetClientRate, class'CoopConfig'.default.NetTickRate);
 	SetNetSpeed(class'CoopConfig'.default.NetClientRate);
 	Log("ModCoop: Net speed is now " $ Player.CurrentNetSpeed);
+
+	// Tests on one PC: simulate an internet connection (-CoopPktLag=<ms>)
+	CommandLine = class'CoopNative'.static.GetCommandLine();
+
+	if(InStr(Caps(CommandLine), "-COOPPKTLAG=") != -1)
+	{
+		Lag = int(Mid(CommandLine, InStr(Caps(CommandLine), "-COOPPKTLAG=") + 12));
+		Log("ModCoop: Simulating lag " $ Lag $ ": " $ ConsoleCommand("PKTLAG " $ Lag) $ " / " $ ConsoleCommand("PKTLAGVARIANCE " $ (Lag / 3)));
+	}
 }
 
 // See CoopGame.MakeMapActorsRelevant. Item is None if it does not exist on this client yet, it is sent again later.
@@ -285,6 +312,93 @@ simulated function FixHandSignalWeapon(float DeltaTime)
  * The headlamp is also used by the visor modes (night vision). PlayerCommando spawns it on the server, squad members taken over
  * by a client have none on the client (CoopCommando does the same in PostNetBeginPlay).
  */
+/*
+ * After a takeover the server picks the current grenade while creating the inventory. The reference reached the client before the
+ * grenades themselves and wasn't sent again: no grenade on the HUD and none could be thrown. Same choice as Pawn.CreateInventory.
+ */
+/*
+ * Between network updates a client moves other pawns by their velocity. Fast and erratic enemies (Geonosians flying and jumping
+ * around) end up far from where the server has them and jump to the new position with every update: 60-130 units several times
+ * per second at 50-90 ms latency. The jump is hidden by drawing the mesh at the old position (PrePivot) and moving it to the real
+ * one within about a tenth of a second. Collision and hits are not affected.
+ */
+simulated function SmoothProxies(float DeltaTime)
+{
+	local Pawn P;
+	local int i;
+	local vector Error;
+	local float ErrorSize;
+
+	for(i = SmoothedPawns.Length - 1; i >= 0; --i)
+	{
+		P = SmoothedPawns[i].P;
+
+		if(P == None || P.bDeleteMe || P.Health <= 0 || P.Role != ROLE_SimulatedProxy)
+		{
+			if(P != None && !P.bDeleteMe)
+				P.PrePivot = SmoothedPawns[i].BasePrePivot;
+
+			SmoothedPawns.Remove(i, 1);
+		}
+	}
+
+	foreach DynamicActors(class'Pawn', P)
+	{
+		if(P == Pawn || P.Role != ROLE_SimulatedProxy || P.Health <= 0 || P.bHidden || P.DrawType != DT_Mesh)
+			continue;
+
+		for(i = 0; i < SmoothedPawns.Length; ++i)
+		{
+			if(SmoothedPawns[i].P == P)
+				break;
+		}
+
+		if(i == SmoothedPawns.Length)
+		{
+			SmoothedPawns.Length = i + 1;
+			SmoothedPawns[i].P = P;
+			SmoothedPawns[i].LastLocation = P.Location;
+			SmoothedPawns[i].LastVelocity = P.Velocity;
+			SmoothedPawns[i].BasePrePivot = P.PrePivot;
+			continue;
+		}
+
+		Error = P.Location - (SmoothedPawns[i].LastLocation + SmoothedPawns[i].LastVelocity * DeltaTime);
+		ErrorSize = VSize(Error);
+
+		if(ErrorSize > 300) // Teleported
+			SmoothedPawns[i].Offset = vect(0,0,0);
+		else if(ErrorSize > 2)
+			SmoothedPawns[i].Offset -= Error;
+
+		SmoothedPawns[i].Offset *= FMax(0, 1 - DeltaTime * 8);
+
+		if(VSize(SmoothedPawns[i].Offset) > 150)
+			SmoothedPawns[i].Offset = Normal(SmoothedPawns[i].Offset) * 150;
+
+		P.PrePivot = SmoothedPawns[i].BasePrePivot + SmoothedPawns[i].Offset;
+		SmoothedPawns[i].LastLocation = P.Location;
+		SmoothedPawns[i].LastVelocity = P.Velocity;
+	}
+}
+
+simulated function EnsureGrenade()
+{
+	local Inventory Inv;
+
+	if(Pawn == None || Pawn.CurrentGrenade != None)
+		return;
+
+	for(Inv = Pawn.Inventory; Inv != None; Inv = Inv.Inventory)
+	{
+		if(Weapon(Inv) != None && Weapon(Inv).WeaponType == WT_Thrown)
+		{
+			Pawn.CurrentGrenade = Weapon(Inv);
+			return;
+		}
+	}
+}
+
 simulated function EnsureHeadlamp()
 {
 	if(Pawn == None || Pawn.Flashlight != None || CoopCommando(Pawn) != None || !Pawn.IsA('CloneCommando'))
@@ -370,6 +484,8 @@ event PlayerTick(float DeltaTime)
 		FixStuckWeapon();
 		FixHandSignalWeapon(DeltaTime);
 		EnsureHeadlamp();
+		EnsureGrenade();
+		SmoothProxies(DeltaTime);
 
 		if(Level.TimeSeconds >= NextHostSkinCheck)
 		{
@@ -448,6 +564,11 @@ exec function Use()
 {
 	local PlayerController Specialist;
 	local ActivateItem Item;
+
+	// Door breaches wait for the clients of the squad (see CoopGame.OrderDoorBreach)
+	if(IsCoopHost() && CoopGame(Level.Game) != None && (TargetType == TGT_Marker || TargetType == TGT_MarkerCancel) &&
+	   CoopGame(Level.Game).OrderDoorBreach(self, TargetMarker, TargetType == TGT_MarkerCancel))
+		return;
 
 	// The host can't order a squad marker whose specialist is played by a client (see CoopGame.MarkerSpecialist)
 	if(IsCoopHost() && CoopGame(Level.Game) != None && (TargetType == TGT_Marker || TargetType == TGT_MarkerCancel) && TargetMarker != None)
@@ -708,6 +829,12 @@ event PlayerCalcView(out actor ViewActor, out vector CameraLocation, out rotator
 
 	Super.PlayerCalcView(ViewActor, CameraLocation, CameraRotation);
 
+	if(CoopGame(Level.Game) != None && CoopGame(Level.Game).bWaitingForClients)
+		CoopGame(Level.Game).CheckClientWaitTime();
+
+	if(Level.NetMode == NM_Client)
+		CalcWatchView(ViewActor, CameraLocation, CameraRotation);
+
 	if(TakeoverStartTime == 0)
 		return;
 
@@ -722,6 +849,77 @@ event PlayerCalcView(out actor ViewActor, out vector CameraLocation, out rotator
 	Alpha = Alpha * Alpha * (3 - 2 * Alpha);
 	CameraLocation = TakeoverFromLocation + (CameraLocation - TakeoverFromLocation) * Alpha + vect(0,0,150) * Sin(Alpha * Pi);
 	CameraRotation = TakeoverFromRotation + Normalize(CameraRotation - TakeoverFromRotation) * Alpha;
+}
+
+// Scene watching (CoopGame.StartWatching): the camera is in the eyes of the squad member, smoothed because the
+// replicated location and rotation of the pawn jump. The pawn and its weapon are hidden so they don't block the view.
+simulated function CalcWatchView(out actor ViewActor, out vector CameraLocation, out rotator CameraRotation)
+{
+	local Pawn P;
+	local float DeltaTime, Alpha;
+	local int i;
+
+	P = Pawn(ViewTarget);
+
+	if(!IsInState('CoopWatching') || P == None || P == Pawn || P.Health <= 0)
+	{
+		RestoreWatchedPawn();
+		return;
+	}
+
+	if(WatchHiddenPawn != P)
+	{
+		RestoreWatchedPawn();
+		WatchHiddenPawn = P;
+
+		if(!P.bHidden)
+		{
+			P.bHidden = true;
+			WatchHiddenActors[WatchHiddenActors.Length] = P;
+		}
+
+		for(i = 0; i < P.Attached.Length; i = i + 1)
+		{
+			if(P.Attached[i] != None && !P.Attached[i].bHidden)
+			{
+				P.Attached[i].bHidden = true;
+				WatchHiddenActors[WatchHiddenActors.Length] = P.Attached[i];
+			}
+		}
+
+		WatchCameraLocation = P.Location + P.EyePosition();
+		WatchCameraRotation = P.Rotation;
+		WatchCameraTime = Level.TimeSeconds;
+	}
+
+	DeltaTime = FClamp(Level.TimeSeconds - WatchCameraTime, 0, 0.1);
+	WatchCameraTime = Level.TimeSeconds;
+	Alpha = FMin(1.0, DeltaTime * 10);
+	WatchCameraLocation = WatchCameraLocation + (P.Location + P.EyePosition() - WatchCameraLocation) * Alpha;
+	Alpha = FMin(1.0, DeltaTime * 5);
+	WatchCameraRotation = Normalize(WatchCameraRotation + Normalize(P.Rotation - WatchCameraRotation) * Alpha);
+	WatchCameraRotation.Roll = 0;
+
+	ViewActor = P;
+	CameraLocation = WatchCameraLocation;
+	CameraRotation = WatchCameraRotation;
+}
+
+simulated function RestoreWatchedPawn()
+{
+	local int i;
+
+	if(WatchHiddenPawn == None && WatchHiddenActors.Length == 0)
+		return;
+
+	for(i = 0; i < WatchHiddenActors.Length; i = i + 1)
+	{
+		if(WatchHiddenActors[i] != None)
+			WatchHiddenActors[i].bHidden = false;
+	}
+
+	WatchHiddenActors.Length = 0;
+	WatchHiddenPawn = None;
 }
 
 // See CoopGame.SyncPanelStates: progress of planting a charge, hacking etc. shown by the HUD

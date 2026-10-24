@@ -14,6 +14,9 @@ native static final function bool HasServerPackage(string PackageName);
 // Returns the command line the game was started with
 native static final function string GetCommandLine();
 
+// Seconds since the game started, also running while the game is paused (Level.TimeSeconds stops)
+native static final function float GetRealTime();
+
 // Releases all CD keys registered with GameSpy. Required to have a client and a host running on the same PC.
 native static final function ReleaseAllCDKeys();
 
@@ -26,6 +29,11 @@ native static final function SetNetRates(int MaxClientRate, int ServerMaxTickRat
 // The game reads mod config files from System but saves them to the save directory (GameData\Save).
 // This loads the class defaults from the saved file so settings like the recent addresses persist.
 native static final function LoadSavedConfig(class<Object> ConfigClass, string IniName);
+
+// Reads and writes one value of a file in the save directory. The config writer comments out values that were loaded with
+// LoadSavedConfig (they were lost after the next start), values written with this are kept.
+native static final function string ReadSavedString(string IniName, string Section, string Key);
+native static final function WriteSavedString(string IniName, string Section, string Key, string Value);
 
 // Native fixes that are needed to play single player maps as a network client
 native static final function InstallClientFixes();

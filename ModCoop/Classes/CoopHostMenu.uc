@@ -127,7 +127,7 @@ simulated function HandleInputBack()
 
 defaultproperties
 {
-	MenuTitle=(Text="CO-OP CAMPAIGN: HOST (MOD 0.55)",bHidden=0)
+	MenuTitle=(Text="CO-OP CAMPAIGN: HOST (MOD 0.57)",bHidden=0)
 	OptionsBorder=(PosX=0.5,PosY=0.42,ScaleX=0.8,ScaleY=0.2,Style="BorderStyle1")
 	OptionLabels(0)=(MenuFont=Font'OrbitFonts.OrbitBold15',Text="LEVEL",DrawPivot=DP_MiddleLeft,PosX=0.15,PosY=0.37,ScaleX=0.8,ScaleY=0.8,Pass=2,Style="LabelText")
 	OptionLabels(1)=(Text="MAX PLAYERS",PosY=0.45)

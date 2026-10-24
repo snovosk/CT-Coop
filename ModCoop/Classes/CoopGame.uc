@@ -21,7 +21,7 @@ var() config float CatchUpDistance;       // Clients further away from the host 
 var() config float CatchUpDelay;
 var() config float HostReviveWaitTime;    // Seconds a downed host waits for a client to revive him when the whole squad is down (0 = single player behavior)
 var() config bool  bClientsTakeOverSquad; // Clients take over squad members (see CheckSquadTakeover)
-var() config float TakeOverDistance;
+var() config float GatherDistance;       // See CheckGather
 var() config float MaxSpawnWait;          // Seconds a client waits for the host to be free (see IsHostFree) before it is spawned anyway
 
 var CoopFixes Fixes;
@@ -39,6 +39,11 @@ var Pawn      TestPawn;
 var bool      bTestPanelHost;
 var byte      TestPanelType;
 var string    TestOptions;
+var SquadMarker TestMarker;
+var string  TestEvents;
+var float   NextTestEvent;
+var int     TestChainStage;
+var vector  TestHostLocation;
 
 var array<Pawn> IncapacitatedPawns; // Pawns the clients were told are incapacitated (see SyncIncapacitated)
 
@@ -71,6 +76,31 @@ struct CollisionState
 var array<CollisionState> CollisionActors;
 var float NextIdleStateSync;
 var float NextIdleStateResend;
+var bool  bRemovedUplink;
+
+// See CheckMissedEvents
+struct ScriptWatch
+{
+	var ScriptedController SC;
+	var int    LastAction;
+	var name   WaitEvent;     // Event it waits for, None if it doesn't wait
+	var float  WaitStart;
+	var string WaitedEvents;  // Events it has waited for before: "|A|B|"
+};
+struct FiredEvent
+{
+	var name  Event;
+	var float Time;
+};
+var array<ScriptWatch> ScriptWatches;
+var array<FiredEvent>  FiredEvents;
+var array<SquadMarker> ClientSnipeMarkers; // See CheckClientSnipers: 1 entry per marker, asked or done
+var array<byte>        ClientSnipeStates;  // 1 = the client was asked to take the position, 2 = in position
+var bool  bWaitingForClients;    // See WaitForClients
+var float ClientWaitTime;        // CoopNative.GetRealTime when the waiting started
+var() config float MaxClientWait;  // Seconds the start of a level waits for the clients of the last level
+var SquadMarker GatherMarker;    // Door breach ordered by the host, waits until all clients playing squad members are at the door (see CheckGather)
+var float NextGatherMessage;
 
 const GAME_CLASS = "ModCoop.CoopGame";
 
@@ -97,6 +127,7 @@ event InitGame(string Options, out string Error)
 
 	TestAction = ParseOption(Options, "CoopTest");
 	TestOptions = Options;
+	TestEvents = ParseOption(Options, "CoopTestEvent");
 	bTestPanelHost = ParseOption(Options, "CoopTestHost") != "";
 	TestPanelType = 7; // ActivateItem.AIT_BactaDispenser
 
@@ -182,6 +213,29 @@ static function bool IsPrivateAddress(string Address)
 	       (A == 100 && B >= 64 && B <= 127);  // CGNAT range used by Tailscale
 }
 
+/*
+ * The master server uplink checks the CD keys of clients. Several clients with the same key (one PC, or the same GOG key) were
+ * kicked a few seconds after joining ("CD key in use", BADCDKEY). Coop is joined by address, so the uplink isn't needed.
+ */
+function RemoveUplink()
+{
+	local Actor A;
+
+	if(bRemovedUplink)
+		return;
+
+	bRemovedUplink = true;
+
+	foreach AllActors(class'Actor', A)
+	{
+		if(A.IsA('MasterServerUplink'))
+		{
+			Log("CoopGame: removing " $ A $ " (CD key checks of clients)");
+			A.Destroy();
+		}
+	}
+}
+
 event PreLogin(string Options, string Address, out string Error, out string FailCode)
 {
 	local string ClientVersion;
@@ -209,6 +263,11 @@ event PostLogin(PlayerController NewPlayer)
 
 	// Otherwise a second game instance on the same PC is rejected because of the duplicate CD key
 	class'CoopNative'.static.ReleaseAllCDKeys();
+
+	if(IsHost(NewPlayer))
+		WaitForClients(NewPlayer);
+	else if(bWaitingForClients)
+		CheckClientsArrived();
 
 	if(!IsHost(NewPlayer))
 	{
@@ -441,6 +500,10 @@ function Timer()
 
 	InitFixes();
 	CleanUpOrphans();
+	RemoveUplink();
+	DetachClientMembers();
+	CheckMissedEvents();
+	CheckClientSnipers();
 
 	if(!bCheckedLevel)
 		CheckLevel();
@@ -562,6 +625,7 @@ event Tick(float DeltaTime)
 		SyncPanelStates(Level.TimeSeconds >= NextIdleStateResend);
 		SyncMapActorCollision();
 		CheckDetonations();
+		CheckGather();
 
 		if(Level.TimeSeconds >= NextIdleStateResend)
 			NextIdleStateResend = Level.TimeSeconds + 3.0;
@@ -704,6 +768,101 @@ function SyncPanelStates(bool bResendAll)
 }
 
 // See CoopPlayer.ServerCoopStartHandSignal
+/*
+ * Door breaches (from GEO_01C on): the host orders it as usual, but the AI can't do the maneuver with squad members played by clients.
+ * The door is breached once every client playing a squad member is at the door, until then they are asked to gather.
+ */
+function bool IsSquadClient(Controller C)
+{
+	return CoopPlayer(C) != None && !IsHost(C) && C.Pawn != None && C.Pawn.Health > 0 && InStr(string(C.Pawn.Class), "Delta") != -1;
+}
+
+function bool HasSquadClients()
+{
+	local Controller C;
+
+	for(C = Level.ControllerList; C != None; C = C.nextController)
+	{
+		if(IsSquadClient(C))
+			return true;
+	}
+
+	return false;
+}
+
+// Called by CoopPlayer.Use: true if the order is handled here
+function bool OrderDoorBreach(PlayerController Host, SquadMarker Marker, bool bCancel)
+{
+	if(Marker == None || !Marker.IsA('MarkerDoorBreach') || BreachDoor(Marker.Anchor) == None || !HasSquadClients())
+		return false;
+
+	if(bCancel || GatherMarker == Marker)
+	{
+		GatherMarker = None;
+		Host.ClientMessage("Door breach cancelled");
+		Log("CoopGame: door breach " $ Marker $ " cancelled");
+		return true;
+	}
+
+	GatherMarker = Marker;
+	NextGatherMessage = 0;
+	Log("CoopGame: door breach " $ Marker $ " ordered, the squad gathers at " $ Marker.Anchor);
+	return true;
+}
+
+function CheckGather()
+{
+	local Controller C;
+	local int Total, Gathered;
+	local string Text;
+
+	if(GatherMarker == None)
+		return;
+
+	if(GatherMarker.Anchor == None || GatherMarker.Anchor.bDeleteMe || !GatherMarker.Anchor.IsInState('Locked') || GetHost() == None)
+	{
+		GatherMarker = None;
+		return;
+	}
+
+	for(C = Level.ControllerList; C != None; C = C.nextController)
+	{
+		if(IsSquadClient(C))
+		{
+			++Total;
+
+			if(!C.Pawn.bIncapacitated && VSize(C.Pawn.Location - GatherMarker.Anchor.Location) < GatherDistance)
+				++Gathered;
+		}
+	}
+
+	if(Gathered < Total)
+	{
+		if(Level.TimeSeconds >= NextGatherMessage)
+		{
+			NextGatherMessage = Level.TimeSeconds + 4;
+			Text = "Delta, gather at the door (" $ Gathered $ "/" $ Total $ ")";
+
+			for(C = Level.ControllerList; C != None; C = C.nextController)
+			{
+				if(PlayerController(C) != None)
+					PlayerController(C).ClientMessage(Text);
+			}
+		}
+
+		return;
+	}
+
+	Log("CoopGame: squad gathered at " $ GatherMarker.Anchor $ ", breaching");
+	ActivateItem(GatherMarker.Anchor).User = GetHost();
+
+	if(GatherMarker.EventUnderway != '')
+		TriggerEvent(GatherMarker.EventUnderway, GatherMarker, GetHost().Pawn);
+
+	GatherMarker.Anchor.GotoState('ChargeLocked');
+	GatherMarker = None;
+}
+
 function CheckDetonations()
 {
 	local Controller C;
@@ -1056,6 +1215,77 @@ function LogPawns()
 }
 
 // Developer test automation. The timer runs once per second.
+// Sev's state and the targets of his script (ACTION_ShootTarget)
+function TestLogSnipe(Pawn P)
+{
+	local ScriptedSequence SS;
+	local Actor A;
+	local int i;
+	local ScriptedController SC;
+	local TriggeredCondition TC;
+	local rotator R;
+
+	Log("CoopTest: snipe: Marker state=" $ TestMarker.GetStateName() $ " active=" $ TestMarker.bMarkerActive $ " squad=" $ TestMarker.Squad $ " sevsquad=" $ P.Squad $ " participant=" $ TestMarker.Participants[0].Member $ " complete=" $ TestMarker.bComplete $ " SevToAnchor=" $ int(VSize(P.Location - TestMarker.Anchor.Location)));
+	// Where the scripts of the scene are (every 10 seconds)
+	if(TestStep % 10 == 5)
+	{
+		foreach DynamicActors(class'ScriptedController', SC)
+		{
+			if(SC.SequenceScript != None && SC.ActionNum < SC.SequenceScript.Actions.Length && SC.SequenceScript.Actions[SC.ActionNum] != None &&
+			   (InStr(string(SC.SequenceScript.Tag), "SunFac") != -1 || SC.SequenceScript.IsA('ScriptedTrigger')))
+				Log("CoopTest: snipe: script " $ SC.SequenceScript $ " Tag=" $ SC.SequenceScript.Tag $ " at " $ SC.ActionNum $ " " $ SC.SequenceScript.Actions[SC.ActionNum].GetActionString() $ " Pawn=" $ SC.Pawn);
+		}
+
+		foreach AllActors(class'TriggeredCondition', TC)
+			Log("CoopTest: snipe: condition " $ TC.Tag $ " Enabled=" $ TC.bEnabled);
+	}
+
+	Log("CoopTest: snipe: Sev Controller=" $ P.Controller $ " State=" $ P.Controller.GetStateName() $ " Action=" $ TestActionString(P) $ " Weapon=" $ P.Weapon $
+	    " Target=" $ P.Controller.Target $ " Enemy=" $ P.Controller.Enemy $ " Loc=" $ P.Location);
+
+	foreach AllActors(class'ScriptedSequence', SS)
+	{
+		for(i = 0; i < SS.Actions.Length; i = i + 1)
+		{
+			if(ACTION_ShootTarget(SS.Actions[i]) != None)
+			{
+				foreach AllActors(class'Actor', A, ACTION_ShootTarget(SS.Actions[i]).TargetTag)
+				{
+					Log("CoopTest: snipe: " $ SS.Tag $ " action " $ i $ " target " $ A $ " (" $ A.Class $ ") Health=" $ A.GetPropertyText("Health") $ " Hidden=" $ A.bHidden $ " Loc=" $ A.Location);
+
+					// The client playing Sev aims at the first target that is still there
+					if(PlayerController(P.Controller) != None && ParseOption(TestOptions, "CoopTestShoot") != "" && !A.bHidden && A.GetPropertyText("Health") != "0")
+					{
+						R = rotator(A.Location - (P.Location + P.EyePosition()));
+						PlayerController(P.Controller).ClientSetRotation(R);
+					}
+				}
+			}
+		}
+	}
+}
+
+function string TestActionString(Pawn P)
+{
+	local ScriptedController SC;
+
+	SC = ScriptedController(P.Controller);
+
+	if(SC == None || SC.SequenceScript == None || SC.ActionNum >= SC.SequenceScript.Actions.Length)
+		return "none";
+
+	return SC.ActionNum $ " " $ SC.SequenceScript.Actions[SC.ActionNum].GetActionString();
+}
+
+function string TestAnimString(Pawn P)
+{
+	local name Seq;
+	local float Frame;
+
+	P.GetAnimParams('', Seq, Frame);
+	return Seq $ " " $ Frame;
+}
+
 function TickTest()
 {
 	local PlayerController Host;
@@ -1063,10 +1293,14 @@ function TickTest()
 	local string NextMap;
 	local rotator R;
 	local Pawn P, P2;
+	local Projectile Proj;
 	local Controller C2;
 	local Actor A2;
 	local int i;
 	local ActivateItem A;
+	local ScriptedController SC;
+	local SquadMarker M;
+	local ScriptedSequence SS;
 
 	if(Level.TimeSeconds < TestTime)
 		return;
@@ -1551,6 +1785,290 @@ function TickTest()
 				Log("CoopTest: memberinfo: near " $ A2.Class.Name $ " " $ A2 $ " Tag=" $ A2.Tag $ " Event=" $ A2.Event $ " Dist=" $ int(VSize(A2.Location - P.Location)) $ " Loc=" $ A2.Location);
 		}
 	}
+	else if(TestAction ~= "scene")
+	{
+		// Triggers CoopTestEvent at step 0, then logs the script of squad member CoopTestMember and its watcher every 0.5 seconds
+		foreach DynamicActors(class'Pawn', P2)
+		{
+			if(string(P2.Class) ~= ("CTCharacters.Commando" $ ParseOption(TestOptions, "CoopTestMember") $ "Delta"))
+				P = P2;
+		}
+
+		// No string to name cast: actors waiting for the event have it as Tag
+		if(TestStep == 0 && ParseOption(TestOptions, "CoopTestEvent") != "")
+		{
+			foreach AllActors(class'Actor', A2)
+			{
+				if(string(A2.Tag) ~= ParseOption(TestOptions, "CoopTestEvent"))
+					A2.Trigger(self, Host.Pawn);
+			}
+		}
+
+		if(P != None)
+		{
+			Log("CoopTest: scene: " $ P $ " Controller=" $ P.Controller $ " Action=" $ TestActionString(P) $ " Loc=" $ P.Location $ " Anim=" $ TestAnimString(P) $
+			    " Watcher=" $ FindWatcher(P));
+		}
+
+		if(TestStep < 80)
+		{
+			TestTime = Level.TimeSeconds + 0.5;
+			++TestStep;
+			return;
+		}
+	}
+	else if(TestAction ~= "levelinfo" && TestStep == 0)
+	{
+		// Logs the squad markers and the scripts that wait for the squad
+		foreach AllActors(class'SquadMarker', M)
+			Log("CoopTest: levelinfo: marker " $ M.Class.Name $ " " $ M $ " Tag=" $ M.Tag $ " Event=" $ M.Event $ " Active=" $ M.bMarkerActive $ " Required=" $ M.MembersRequired $ " Anchor=" $ M.Anchor $ " Loc=" $ M.Location);
+
+		foreach AllActors(class'ScriptedSequence', SS)
+		{
+			for(i = 0; i < SS.Actions.Length; i = i + 1)
+			{
+				if(SS.Actions[i] != None && !SS.Actions[i].IsA('ACTION_PlaySound') && !SS.Actions[i].IsA('ACTION_PlayAnim'))
+					Log("CoopTest: levelinfo: " $ SS $ " Tag=" $ SS.Tag $ " " $ i $ " " $ SS.Actions[i].Class.Name $ " " $ SS.Actions[i].GetActionString());
+			}
+		}
+	}
+	else if(TestAction ~= "breach")
+	{
+		// GEO_01C: waits for the clients to play squad members, the host orders the door breach, then the clients come to the door one by one
+		if(TestStep == 0)
+		{
+			i = 0;
+
+			for(C = Level.ControllerList; C != None; C = C.nextController)
+			{
+				if(IsSquadClient(C))
+					++i;
+			}
+
+			foreach AllActors(class'SquadMarker', M)
+			{
+				if(M.IsA('MarkerDoorBreach'))
+					TestMarker = M;
+			}
+
+			Log("CoopTest: breach: squad clients=" $ i $ " marker=" $ TestMarker);
+
+			if(i < 3 || TestMarker == None)
+			{
+				TestTime = Level.TimeSeconds + 2;
+				return;
+			}
+
+			R = TestMarker.Anchor.Rotation;
+			R.Pitch = 0;
+			Host.Pawn.SetLocation(TestMarker.Anchor.Location + vector(R) * 150 + vect(0,0,-40));
+			Log("CoopTest: breach: order handled=" $ OrderDoorBreach(Host, TestMarker, false));
+		}
+		else if(TestStep % 4 == 0)
+		{
+			i = 0;
+
+			for(C = Level.ControllerList; C != None; C = C.nextController)
+			{
+				if(IsSquadClient(C) && VSize(C.Pawn.Location - TestMarker.Anchor.Location) >= GatherDistance)
+				{
+					R = TestMarker.Anchor.Rotation;
+					R.Pitch = 0;
+					R.Yaw += 6000 * TestStep / 4;
+					C.Pawn.SetLocation(TestMarker.Anchor.Location + vector(R) * 250 + vect(0,0,-40));
+					Log("CoopTest: breach: moved " $ C.PlayerReplicationInfo.PlayerName $ " to the door");
+					break;
+				}
+			}
+		}
+
+		Log("CoopTest: breach: Gather=" $ GatherMarker $ " Door=" $ TestMarker.Anchor.GetStateName());
+
+		if(TestStep < 30)
+		{
+			TestTime = Level.TimeSeconds + 1;
+			++TestStep;
+			return;
+		}
+	}
+	else if(TestAction ~= "assign" && TestStep == 0)
+	{
+		// Saving of squad assignments (see CoopConfig.SetSquadAssignment)
+		class'CoopConfig'.static.SetSquadAssignment("test/A", "CTCharacters.Commando07Delta");
+		class'CoopConfig'.static.SetSquadAssignment("test/B", "CTCharacters.Commando62Delta");
+		class'CoopConfig'.static.SetSquadAssignment("test/C", "CTCharacters.Commando40Delta");
+		Log("CoopTest: assign: " $ class'CoopConfig'.default.SquadAssignmentList $ " saved=" $ class'CoopNative'.static.ReadSavedString("ModCoop.ini", "ModCoop.Lists", "SquadAssignmentList"));
+	}
+	else if(TestAction ~= "snipe")
+	{
+		// GEO_01C: the host orders the snipe marker (step 0, repeated until it works), then Sev's script, weapon and targets are logged.
+		// With CoopTestShoot=1 a client playing Sev is put on the sniper position and aimed at the target (it fires from its window).
+		foreach DynamicActors(class'Pawn', P2)
+		{
+			if(P2.IsA('Commando07Delta'))
+				P = P2;
+		}
+
+		foreach AllActors(class'SquadMarker', M)
+		{
+			if(M.IsA('MarkerSnipe'))
+				TestMarker = M;
+		}
+
+		if(P == None || TestMarker == None)
+		{
+			Log("CoopTest: snipe: Sev=" $ P $ " Marker=" $ TestMarker);
+			TestTime = Level.TimeSeconds + 2;
+			return;
+		}
+
+		if(TestStep == 0)
+		{
+			Log("CoopTest: snipe: marker events underway=" $ TestMarker.EventUnderway $ " completed=" $ TestMarker.EventCompleted $ " event=" $ TestMarker.Event $ " anchor=" $ TestMarker.Anchor.Class $ " anchor tag=" $ TestMarker.Anchor.Tag $ " anchor event=" $ TestMarker.Anchor.Event);
+			Log("CoopTest: snipe: marker visible=" $ TestMarker.AlwaysVisible $ " active=" $ TestMarker.bMarkerActive $ " Sev controller=" $ P.Controller $ " client=" $ MarkerClient(TestMarker));
+
+			// CoopTestEvent=WindowDestroyed,SunFacRoomDoorOpened skips the window and the door of the strategy room, one event every
+			// 6 seconds, then the level activates the marker
+			if(!TestMarker.AlwaysVisible && TestEvents != "" && Level.TimeSeconds >= NextTestEvent)
+			{
+				NextTestEvent = Level.TimeSeconds + 6;
+
+				if(InStr(TestEvents, ",") != -1)
+				{
+					NextMap = Left(TestEvents, InStr(TestEvents, ","));
+					TestEvents = Mid(TestEvents, InStr(TestEvents, ",") + 1);
+				}
+				else
+				{
+					NextMap = TestEvents;
+					TestEvents = "";
+				}
+
+				Log("CoopTest: snipe: triggering " $ NextMap);
+
+				foreach AllActors(class'Actor', A2)
+				{
+					if(string(A2.Tag) ~= NextMap)
+						A2.Trigger(self, Host.Pawn);
+				}
+			}
+
+			// CoopTestChain=1 plays the level up to the marker: the window of the strategy room is shot, the door to Sun Fac breached
+			if(!TestMarker.AlwaysVisible && ParseOption(TestOptions, "CoopTestChain") != "" && Level.TimeSeconds >= NextTestEvent)
+			{
+				for(C = Level.ControllerList; C != None; C = C.nextController)
+				{
+					if(PlayerController(C) != None)
+						PlayerController(C).bGodMode = true;
+				}
+
+				if(TestChainStage == 0)
+				{
+					foreach AllActors(class'Actor', A2)
+					{
+						if(Prop(A2) != None && (Prop(A2).DestroyedState.Event == 'WindowDestroyed' || Prop(A2).DamagedState.Event == 'WindowDestroyed'))
+						{
+							Log("CoopTest: snipe: shooting " $ A2 $ " (" $ A2.Class $ ")");
+							A2.TakeDamage(100000, Host.Pawn, A2.Location, vect(0,0,0), class'DamageType');
+						}
+					}
+
+					TestChainStage = 1;
+					NextTestEvent = Level.TimeSeconds + 20;
+				}
+				else if(TestChainStage == 1)
+				{
+					foreach AllActors(class'SquadMarker', M)
+					{
+						if(M.IsA('MarkerDoorBreach') && M.Anchor != None && M.Anchor.IsInState('Locked'))
+						{
+							Log("CoopTest: snipe: breaching " $ M.Anchor);
+							ActivateItem(M.Anchor).User = Host;
+							M.Anchor.GotoState('ChargeLocked');
+						}
+					}
+
+					TestChainStage = 2;
+				}
+			}
+
+			// Sun Fac has to wait at his ship before Sev is on the marker, otherwise he misses SunFacRunToShip (Sev is moved there at once)
+			foreach DynamicActors(class'ScriptedController', SC)
+			{
+				// CoopTestRush=1 doesn't wait (see CheckMissedEvents)
+				if(SC.SequenceScript != None && SC.SequenceScript.Tag == 'SunFacAI' && SC.ActionNum < 16 && ParseOption(TestOptions, "CoopTestRush") == "")
+				{
+					Log("CoopTest: snipe: Sun Fac at " $ SC.ActionNum);
+					TestTime = Level.TimeSeconds + 2;
+					return;
+				}
+			}
+
+			if(!TestMarker.AlwaysVisible)
+			{
+				Log("CoopTest: snipe: Sev " $ TestActionString(P) $ " Health=" $ P.Health $ " Incap=" $ P.bIncapacitated $ " Physics=" $ P.Physics $ " Loc=" $ P.Location);
+				TestTime = Level.TimeSeconds + 2;
+				return;
+			}
+
+			if(PlayerController(P.Controller) != None)
+			{
+				if(ParseOption(TestOptions, "CoopTestShoot") != "" && TestStep == 0 && TestHostLocation == vect(0,0,0))
+				{
+					TestHostLocation = Host.Pawn.Location;
+					P.SetLocation(TestMarker.Location + vect(0,150,60));
+					Log("CoopTest: snipe: moved the client playing Sev to " $ P.Location);
+				}
+			}
+			else
+			{
+				// Like a player who walked to the balcony and gives the order there
+				TestHostLocation = Host.Pawn.Location;
+				Host.Pawn.SetLocation(TestMarker.Location + vect(0,0,60));
+				i = 0;
+
+				foreach DynamicActors(class'Pawn', P2)
+				{
+					// Only Sev, the marker takes the closest member
+					if(P2 == P)
+					{
+						P2.SetLocation(TestMarker.Location + vect(0,150,0) - vect(0,0,1) * (TestMarker.Location.Z - Host.Pawn.Location.Z));
+
+						Log("CoopTest: snipe: moved " $ P2 $ " to " $ P2.Location);
+					}
+				}
+
+				R.Yaw = 0;
+				Log("CoopTest: snipe: host at " $ Host.Pawn.Location $ " anchor at " $ TestMarker.Anchor.Location);
+				TestMarker.NotifyTargeted(Host);
+				Log("CoopTest: snipe: ExecuteMarker=" $ TestMarker.ExecuteMarker(Host.Pawn));
+			}
+		}
+
+		// The host steps back from the sniper position once the order is given
+		if(TestHostLocation != vect(0,0,0) && TestMarker.IsInState('Setup'))
+		{
+			Host.Pawn.SetLocation(TestHostLocation);
+			TestHostLocation = vect(0,0,0);
+			Log("CoopTest: snipe: host moved back to " $ Host.Pawn.Location);
+		}
+
+		// The marker is disabled for a moment after the squad was moved: the order is repeated
+		if(TestStep > 0 && TestStep < 30 && PlayerController(P.Controller) == None && !TestMarker.bMarkerActive && TestMarker.IsInState('Enabled'))
+		{
+			TestMarker.NotifyTargeted(Host);
+			Log("CoopTest: snipe: ExecuteMarker again=" $ TestMarker.ExecuteMarker(Host.Pawn));
+		}
+
+		TestLogSnipe(P);
+
+		if(TestStep < 150)
+		{
+			TestTime = Level.TimeSeconds + 1;
+			++TestStep;
+			return;
+		}
+	}
 	else if(TestAction ~= "squadinfo")
 	{
 		// Logs the commandos of the level and their squads every 2 seconds
@@ -1619,6 +2137,34 @@ function TickTest()
 			return;
 		}
 	}
+	else if(TestAction ~= "grenade")
+	{
+		// Logs the grenades of the first client while it throws some (right mouse button in its window)
+		for(C = Level.ControllerList; C != None; C = C.nextController)
+		{
+			if(CoopPlayer(C) != None && !IsHost(C) && C.Pawn != None)
+				break;
+		}
+
+		if(C != None && C.Pawn.CurrentGrenade != None)
+		{
+			i = 0;
+
+			foreach DynamicActors(class'Projectile', Proj)
+			{
+				i = i + 1;
+			}
+
+			Log("CoopTest: grenade: Weapon=" $ C.Pawn.Weapon $ " State=" $ C.Pawn.Weapon.GetStateName() $ " Grenade=" $ C.Pawn.CurrentGrenade $ " Ammo=" $ C.Pawn.CurrentGrenade.AmmoType.AmmoAmount $ " Projectiles=" $ i);
+		}
+
+		if(TestStep < 120)
+		{
+			TestTime = Level.TimeSeconds + 0.25;
+			++TestStep;
+			return;
+		}
+	}
 	else if(TestAction ~= "npc" && TestStep == 0)
 	{
 		// Spawns a battle droid in front of the client (animations and rotation of AI on clients)
@@ -1630,7 +2176,11 @@ function TickTest()
 				R = C.Pawn.Rotation;
 				R.Pitch = 0;
 				R.Yaw += 8192;
-				P = Spawn(class<Pawn>(DynamicLoadObject("CTCharacters.BattleDroid", class'Class')),,, C.Pawn.Location + vector(R) * 500 + vect(0,0,40), rotator(-vector(R)));
+				// CoopTestNPC=GeonosianWarrior for another class
+				if(ParseOption(TestOptions, "CoopTestNPC") != "")
+					P = Spawn(class<Pawn>(DynamicLoadObject("CTCharacters." $ ParseOption(TestOptions, "CoopTestNPC"), class'Class')),,, C.Pawn.Location + vector(R) * 500 + vect(0,0,40), rotator(-vector(R)));
+				else
+					P = Spawn(class<Pawn>(DynamicLoadObject("CTCharacters.BattleDroid", class'Class')),,, C.Pawn.Location + vector(R) * 500 + vect(0,0,40), rotator(-vector(R)));
 
 				if(P != None && P.Controller == None && P.ControllerClass != None)
 				{
@@ -1726,8 +2276,251 @@ function bool IsScriptBusy(Pawn P)
 
 	SC = ScriptedController(P.Controller);
 
-	return SC == None || SC.SequenceScript == None || SC.ActionNum >= SC.SequenceScript.Actions.Length ||
-	       !SC.SequenceScript.Actions[SC.ActionNum].IsA('ACTION_WaitForEvent');
+	if(SC == None || SC.SequenceScript == None || SC.ActionNum >= SC.SequenceScript.Actions.Length)
+		return true;
+
+	// A watched scene is over as soon as the squad member joined: the walk to its next position is cut (see RunSkippedActions)
+	if(FindWatcher(P) != None && FindAddIndex(SC, P) != -1 && SC.ActionNum > FindAddIndex(SC, P))
+		return false;
+
+	return !SC.SequenceScript.Actions[SC.ActionNum].IsA('ACTION_WaitForEvent');
+}
+
+/*
+ * Snipe markers (GEO_01C: Sun Fac's ship): the AI sniper triggers EventUnderway (InSnipePosition) when it reached the position, the
+ * level decides on it whether the mission succeeds. A client playing Sev can't be ordered there: he is asked to go there himself
+ * when the level shows the marker, and the event is triggered once he is next to the position.
+ */
+function CheckClientSnipers()
+{
+	local SquadMarker M;
+	local PlayerController PC;
+	local int i;
+
+	foreach AllActors(class'SquadMarker', M)
+	{
+		if(!M.IsA('MarkerSnipe') || M.Anchor == None || M.bMarkerActive || (!M.AlwaysVisible && !M.IsInState('Enabled')))
+			continue;
+
+		PC = MarkerClient(M);
+
+		if(PC == None || PC.Pawn == None)
+			continue;
+
+		for(i = 0; i < ClientSnipeMarkers.Length; i = i + 1)
+		{
+			if(ClientSnipeMarkers[i] == M)
+				break;
+		}
+
+		if(i == ClientSnipeMarkers.Length)
+		{
+			if(!M.AlwaysVisible)
+				continue;
+
+			ClientSnipeMarkers[i] = M;
+			ClientSnipeStates[i] = 1;
+			PC.ClientMessage("Take the sniper position");
+			Log("CoopGame: " $ PC.PlayerReplicationInfo.PlayerName $ " has to take the sniper position of " $ M $ " at " $ M.Anchor);
+		}
+
+		if(ClientSnipeStates[i] == 1 && VSize(PC.Pawn.Location - M.Anchor.Location) < 250)
+		{
+			ClientSnipeStates[i] = 2;
+			Log("CoopGame: " $ PC.PlayerReplicationInfo.PlayerName $ " is in the sniper position of " $ M $ ", triggering " $ M.EventUnderway);
+
+			if(M.Event != '')
+				TriggerEvent(M.Event, M, PC.Pawn);
+
+			if(M.EventUnderway != '')
+				TriggerEvent(M.EventUnderway, M, PC.Pawn);
+		}
+	}
+}
+
+/*
+ * Level scripts wait for events of other scripts. When players are faster than the designers expected the event comes before the
+ * script waits for it and the scene stops forever (GEO_01C: Sev on the sniper position before Sun Fac reached his ship, Sun Fac
+ * never got SunFacRunToShip). An event a script missed by up to 30 seconds is passed on when it starts waiting, but only the
+ * first time it waits for that event (scripts that wait for the same event in a loop are left alone).
+ */
+function CheckMissedEvents()
+{
+	local ScriptedController SC;
+	local ScriptedSequence Seq;
+	local ACTION_WaitForEvent Wait;
+	local int i, j, n;
+	local bool bFound;
+
+	for(i = FiredEvents.Length - 1; i >= 0; i = i - 1)
+	{
+		if(Level.TimeSeconds - FiredEvents[i].Time > 30)
+			FiredEvents.Remove(i, 1);
+	}
+
+	for(i = ScriptWatches.Length - 1; i >= 0; i = i - 1)
+	{
+		if(ScriptWatches[i].SC == None || ScriptWatches[i].SC.bDeleteMe)
+			ScriptWatches.Remove(i, 1);
+	}
+
+	foreach DynamicActors(class'ScriptedController', SC)
+	{
+		Seq = SC.SequenceScript;
+
+		if(Seq == None)
+			continue;
+
+		bFound = false;
+
+		for(i = 0; i < ScriptWatches.Length; i = i + 1)
+		{
+			if(ScriptWatches[i].SC == SC)
+			{
+				bFound = true;
+				break;
+			}
+		}
+
+		if(!bFound)
+		{
+			i = ScriptWatches.Length;
+			ScriptWatches.Length = i + 1;
+			ScriptWatches[i].SC = SC;
+			ScriptWatches[i].LastAction = SC.ActionNum;
+		}
+
+		// Events of the actions the script went through since the last check
+		if(SC.ActionNum > ScriptWatches[i].LastAction)
+		{
+			for(j = ScriptWatches[i].LastAction; j < SC.ActionNum && j < Seq.Actions.Length; j = j + 1)
+			{
+				if(ACTION_TriggerEvent(Seq.Actions[j]) != None && ACTION_TriggerEvent(Seq.Actions[j]).Event != '')
+				{
+					n = FiredEvents.Length;
+					FiredEvents.Length = n + 1;
+					FiredEvents[n].Event = ACTION_TriggerEvent(Seq.Actions[j]).Event;
+					FiredEvents[n].Time = Level.TimeSeconds;
+				}
+			}
+		}
+
+		ScriptWatches[i].LastAction = SC.ActionNum;
+
+		Wait = None;
+
+		if(SC.ActionNum < Seq.Actions.Length)
+			Wait = ACTION_WaitForEvent(Seq.Actions[SC.ActionNum]);
+
+		if(Wait == None || Wait.ExternalEvent == '' || SC.CurrentAction != Wait || SC.Tag != Wait.ExternalEvent)
+		{
+			ScriptWatches[i].WaitEvent = '';
+			continue;
+		}
+
+		if(ScriptWatches[i].WaitEvent != Wait.ExternalEvent)
+		{
+			ScriptWatches[i].WaitEvent = Wait.ExternalEvent;
+			ScriptWatches[i].WaitStart = Level.TimeSeconds;
+
+			if(InStr(ScriptWatches[i].WaitedEvents, "|" $ Wait.ExternalEvent $ "|") != -1)
+				continue;
+
+			ScriptWatches[i].WaitedEvents = ScriptWatches[i].WaitedEvents $ "|" $ Wait.ExternalEvent $ "|";
+
+			for(j = 0; j < FiredEvents.Length; j = j + 1)
+			{
+				if(FiredEvents[j].Event == Wait.ExternalEvent)
+				{
+					Log("CoopGame: " $ Seq $ " (" $ Seq.Tag $ ") missed " $ Wait.ExternalEvent $ " " $ (Level.TimeSeconds - FiredEvents[j].Time) $ " seconds ago, passing it on");
+					SC.Trigger(self, None);
+					break;
+				}
+			}
+		}
+	}
+}
+
+/*
+ * Squad members played by clients are not in the AI squad. The squad AI of the other members treats every member as a bot: the host
+ * crashed in AController::Tick of Sev (GEO_04A, squad goal SearchAndDestroy) as soon as a client took over Scorch. Scripts add
+ * members to the squad again (ACTION_ChangeSquadMember), so this is checked every second.
+ */
+function DetachClientMembers()
+{
+	local Controller C;
+
+	for(C = Level.ControllerList; C != None; C = C.nextController)
+	{
+		if(IsSquadClient(C) && C.Pawn.Squad != None)
+		{
+			Log("CoopGame: removing " $ C.Pawn $ " of " $ C.PlayerReplicationInfo.PlayerName $ " from the AI squad " $ C.Pawn.Squad);
+			C.Pawn.Squad.RemoveFromSquad(C.Pawn);
+		}
+	}
+}
+
+// Before a level change so the squad members of the clients are in the squad of the next level
+function AttachClientMembers(Squad S)
+{
+	local Controller C;
+
+	for(C = Level.ControllerList; C != None; C = C.nextController)
+	{
+		if(IsSquadClient(C) && C.Pawn.Squad == None)
+			S.AddToSquad(C.Pawn);
+	}
+}
+
+// Index of the script action that adds the squad member to the squad, -1 if none
+function int FindAddIndex(ScriptedController SC, Pawn P)
+{
+	local ACTION_ChangeSquadMember Change;
+	local int i;
+
+	for(i = 0; i < SC.SequenceScript.Actions.Length; i = i + 1)
+	{
+		Change = ACTION_ChangeSquadMember(SC.SequenceScript.Actions[i]);
+
+		if(Change != None && Change.bAddMember && Change.MemberTag == P.Tag)
+			return i;
+	}
+
+	return -1;
+}
+
+/*
+ * The script of a squad member is dropped when a client takes it over. Events and objectives the script would still trigger before it
+ * waits again (GEO_01B: Fixer triggers the shield dialog after walking to the hack panel) are triggered right away.
+ */
+function RunSkippedActions(Pawn P)
+{
+	local ScriptedController SC;
+	local ScriptedAction Action;
+	local int i;
+
+	SC = ScriptedController(P.Controller);
+
+	if(SC == None || SC.SequenceScript == None || !SC.IsInState('Scripting'))
+		return;
+
+	for(i = SC.ActionNum; i < SC.SequenceScript.Actions.Length; i = i + 1)
+	{
+		Action = SC.SequenceScript.Actions[i];
+
+		if(Action == None)
+			continue;
+
+		if(Action.IsA('ACTION_WaitForEvent') || Action.IsA('ACTION_WaitForPlayer') || Action.IsA('ACTION_GotoAction') || Action.IsA('ACTION_GotoLabel') ||
+		   Action.IsA('ACTION_IfCondition') || Action.IsA('ACTION_IfRandomPct') || Action.IsA('ACTION_EndSection') || Action.IsA('ACTION_ChangeScript'))
+			break;
+
+		if(Action.IsA('ACTION_TriggerEvent') || Action.IsA('ACTION_ObjectiveUpdate') || Action.IsA('ACTION_ChangeSquadMember'))
+		{
+			Log("CoopGame: running skipped script action of " $ P $ ": " $ Action.GetActionString());
+			Action.InitActionFor(SC);
+		}
+	}
 }
 
 /*
@@ -1825,12 +2618,12 @@ function StartWatching(CoopPlayer CP, Pawn P, bool bMoveCamera)
 	if(bMoveCamera && CP.Pawn != None)
 		CP.ClientCoopTakeoverCamera(CP.Pawn.Location + CP.Pawn.EyePosition(), CP.Rotation);
 
-	// From behind: the squad member's eyes often look at a wall during its scene
+	// Through the eyes of the squad member (see CoopPlayer.CalcWatchView)
 	CP.WatchedMember = P;
 	CP.SetViewTarget(P);
 	CP.ClientSetViewTarget(P);
-	CP.bBehindView = true;
-	CP.ClientSetBehindView(true);
+	CP.bBehindView = false;
+	CP.ClientSetBehindView(false);
 	CP.GotoState('CoopWatching');
 	CP.ClientGotoState('CoopWatching', '');
 
@@ -1841,7 +2634,7 @@ function StartWatching(CoopPlayer CP, Pawn P, bool bMoveCamera)
 function CheckSquadTakeover()
 {
 	local PlayerController Host;
-	local Controller C;
+	local Controller C, Best;
 	local Pawn P;
 
 	if(!bClientsTakeOverSquad)
@@ -1871,17 +2664,22 @@ function CheckSquadTakeover()
 			continue; // Reserved for that client
 		}
 
-		// Otherwise the first client without a squad member that reaches it
+		// Otherwise the closest client without a squad member, wherever it is (GEO_01C: a client that spawned on the balcony can't
+		// follow the host down the rope to Scorch). The camera flies to the squad member.
+		Best = None;
+
 		for(C = Level.ControllerList; C != None; C = C.nextController)
 		{
 			if(CoopPlayer(C) != None && !IsHost(C) && CoopCommando(C.Pawn) != None && C.Pawn.Health > 0 && !C.Pawn.bIncapacitated &&
-			   GetAssignedClass(PlayerController(C)) == "" &&
-			   VSize(C.Pawn.Location - P.Location) < TakeOverDistance && FastTrace(P.Location, C.Pawn.Location + C.Pawn.EyePosition()))
-			{
-				SetAssignment(PlayerController(C), string(P.Class));
-				TakeOver(CoopPlayer(C), P, true);
-				return; // One per second is enough
-			}
+			   GetAssignedClass(PlayerController(C)) == "" && (Best == None || VSize(C.Pawn.Location - P.Location) < VSize(Best.Pawn.Location - P.Location)))
+				Best = C;
+		}
+
+		if(Best != None)
+		{
+			SetAssignment(PlayerController(Best), string(P.Class));
+			TakeOver(CoopPlayer(Best), P, true);
+			return; // One per second is enough
 		}
 	}
 }
@@ -2011,6 +2809,21 @@ function Pawn FindAssignedMember(CoopPlayer CP)
 	return None;
 }
 
+static function LinkPlayerAnims(Pawn P)
+{
+	local MeshAnimation MPSet;
+
+	if(P.HasAnim('DC17mThrowGrenade'))
+		return;
+
+	MPSet = MeshAnimation(DynamicLoadObject("Clone.MPSet", class'MeshAnimation', true));
+
+	if(MPSet != None)
+		P.LinkAnimToMesh(MPSet, P.Mesh);
+
+	Log("CoopGame: Linked player animations to " $ P $ ": " $ P.HasAnim('DC17mThrowGrenade'));
+}
+
 function TakeOver(CoopPlayer CP, Pawn P, bool bMoveCamera)
 {
 	local Pawn OldPawn;
@@ -2022,6 +2835,7 @@ function TakeOver(CoopPlayer CP, Pawn P, bool bMoveCamera)
 	OldAI = P.Controller;
 	CP.WatchedMember = None;
 	Log("CoopGame: " $ CP.PlayerReplicationInfo.PlayerName $ " takes over " $ P $ " (" $ P.Class $ ") from " $ OldAI);
+	RunSkippedActions(P);
 
 	// The camera moves from the old view to the new pawn on the client (only when a client gets a squad member for the first time)
 	if(OldPawn != None && bMoveCamera)
@@ -2038,8 +2852,13 @@ function TakeOver(CoopPlayer CP, Pawn P, bool bMoveCamera)
 	CP.bCoopTakeover = true;
 	CP.Possess(P);
 	CP.bCoopTakeover = false;
+	DetachClientMembers();
 	CP.bBehindView = false;
 	CP.ClientSetBehindView(false);
+
+	// The single player animations of squad members have no player grenade throw ('DC17mThrowGrenade'), its notify releases the
+	// grenade. The multiplayer animations have it.
+	LinkPlayerAnims(P);
 
 	// Scripts crouch or hurt squad members (Fixer is hurt in his scene): a player starts standing and healthy
 	P.ShouldCrouch(false);
@@ -2143,8 +2962,12 @@ function PrepareHostForTravel()
 	if(P == None)
 		return;
 
+	// Squad members played by clients travel with the squad (see DetachClientMembers)
 	if(P.Squad != None)
+	{
+		AttachClientMembers(P.Squad);
 		P.SaveSquadTravelInfo();
+	}
 
 	// PlayerCommando.TravelPostAccept sets this stance on the squad of the next level. It is None if there was no squad in the current level.
 	if(P.CurrentStance == None)
@@ -2188,8 +3011,75 @@ function string SkipBriefing(string URL)
 	return NextMap $ Options;
 }
 
+/*
+ * After a level change the game is paused until the clients of the last level are back, so nobody misses the start of the level
+ * (intro cutscenes start right away). Clients that don't come back within MaxClientWait seconds are not waited for.
+ */
+function int CountClients()
+{
+	local Controller C;
+	local int n;
+
+	for(C = Level.ControllerList; C != None; C = C.nextController)
+	{
+		if(CoopPlayer(C) != None && !IsHost(C))
+			++n;
+	}
+
+	return n;
+}
+
+function WaitForClients(PlayerController Host)
+{
+	// Test: CoopTestWait=<clients> waits for clients that never come (see CheckClientWaitTime)
+	if(ParseOption(TestOptions, "CoopTestWait") != "")
+		class'CoopConfig'.default.TravelClients = int(ParseOption(TestOptions, "CoopTestWait"));
+
+	if(class'CoopConfig'.default.TravelClients <= CountClients() || MaxClientWait <= 0)
+	{
+		class'CoopConfig'.default.TravelClients = 0;
+		return;
+	}
+
+	Log("CoopGame: waiting for " $ class'CoopConfig'.default.TravelClients $ " clients before the level starts");
+	bWaitingForClients = true;
+	ClientWaitTime = class'CoopNative'.static.GetRealTime();
+	Level.Pauser = Host.PlayerReplicationInfo;
+	Host.ClientMessage("Waiting for players (0/" $ class'CoopConfig'.default.TravelClients $ ")");
+}
+
+function CheckClientsArrived()
+{
+	local int n;
+
+	n = CountClients();
+	Broadcast(self, "Waiting for players (" $ n $ "/" $ class'CoopConfig'.default.TravelClients $ ")");
+
+	if(n >= class'CoopConfig'.default.TravelClients)
+		StopWaitingForClients();
+}
+
+// Called by CoopPlayer.PlayerCalcView of the host: nothing is ticked while the game is paused but the view is still drawn
+function CheckClientWaitTime()
+{
+	if(class'CoopNative'.static.GetRealTime() - ClientWaitTime >= MaxClientWait)
+	{
+		Log("CoopGame: clients didn't come back in time, starting the level");
+		StopWaitingForClients();
+	}
+}
+
+function StopWaitingForClients()
+{
+	bWaitingForClients = false;
+	class'CoopConfig'.default.TravelClients = 0;
+	Level.Pauser = None;
+	Log("CoopGame: starting the level with " $ CountClients() $ " clients");
+}
+
 function CoopTravel(string URL)
 {
+	class'CoopConfig'.default.TravelClients = CountClients();
 	URL = SkipBriefing(URL);
 	PrepareHostForTravel();
 	Log("CoopGame: Traveling to " $ URL);
@@ -2203,6 +3093,7 @@ function CoopRestartLevel()
 	local string Map;
 
 	Host = GetHost();
+	class'CoopConfig'.default.TravelClients = CountClients();
 
 	if(Host != None)
 		Host.GetCurrentMapName(Map);
@@ -2273,7 +3164,8 @@ defaultproperties
 	MaxCoopPlayers=4
 	ClientRespawnDelay=5.0
 	bClientsTakeOverSquad=True
-	TakeOverDistance=500
+	GatherDistance=600
+	MaxClientWait=60
 	ClientBleedOutTime=45.0
 	CatchUpDistance=4000.0
 	CatchUpDelay=15.0

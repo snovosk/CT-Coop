@@ -7,19 +7,20 @@ class CoopConfig extends Object config(ModCoop);
  */
 
 // Mod version. Every player must have the same build (the package GUIDs must match), so increase this with every release.
-const MOD_VERSION = "0.55";
+const MOD_VERSION = "0.57";
 
 var string               RecentAddresses[5]; // Most recent first, loaded from RecentAddressList (see LoadLists)
-// Lists are saved as one string: the config writer of RC comments out dynamic arrays and also elements of static arrays that were
-// loaded from the file, so they were lost after a restart
-var config string        RecentAddressList;      // "address|address|..."
-var config string        SquadAssignmentList;    // "<player key>=<squad member class>|...", see CoopGame.PlayerKey
+// Lists are saved as one string in their own section (CoopNative.WriteSavedString): the config writer of RC comments out values
+// loaded from the file, and StaticSaveConfig put a changed string back to the value it saved first
+var string               RecentAddressList;      // "address|address|..."
+var string               SquadAssignmentList;    // "<player key>=<squad member class>|...", see CoopGame.PlayerKey
 var config array<string> CoopLevels;       // Levels that can be selected in the host menu. Remove a level here to disable it.
 var config int           LastLevelIndex;
 var config int           LastMaxPlayers;
 var config int           DefaultPort;
 
 // Reconnect state (client only). Kept in memory, not saved.
+var int    TravelClients;                  // Host: clients that played the last level, the next one waits for them (see CoopGame.WaitForClients)
 var string ReconnectAddress;               // Address of the coop host we are playing on. Empty if not in a coop session.
 var int    ReconnectAttempts;
 var config int MaxReconnectAttempts;
@@ -63,7 +64,7 @@ static function AddRecentAddress(string Address)
 			default.RecentAddressList = default.RecentAddressList $ default.RecentAddresses[i] $ "|";
 	}
 
-	StaticSaveConfig();
+	class'CoopNative'.static.WriteSavedString("ModCoop.ini", "ModCoop.Lists", "RecentAddressList", default.RecentAddressList);
 }
 
 // Called after the config was loaded (CoopExtension.Init)
@@ -72,6 +73,8 @@ static function LoadLists()
 	local string List;
 	local int i;
 
+	default.RecentAddressList = class'CoopNative'.static.ReadSavedString("ModCoop.ini", "ModCoop.Lists", "RecentAddressList");
+	default.SquadAssignmentList = class'CoopNative'.static.ReadSavedString("ModCoop.ini", "ModCoop.Lists", "SquadAssignmentList");
 	List = default.RecentAddressList;
 
 	for(i = 0; i < ArrayCount(default.RecentAddresses); ++i)
@@ -144,7 +147,7 @@ static function SetSquadAssignment(string Key, string MemberClass)
 	}
 
 	default.SquadAssignmentList = NewList $ Key $ "=" $ MemberClass $ "|";
-	StaticSaveConfig();
+	class'CoopNative'.static.WriteSavedString("ModCoop.ini", "ModCoop.Lists", "SquadAssignmentList", default.SquadAssignmentList);
 }
 
 static function int NumRecentAddresses()

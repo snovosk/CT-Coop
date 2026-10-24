@@ -95,6 +95,15 @@ void UCoopNative::execGetCommandLine(FFrame& Stack, void* Result)
 	*static_cast<FString*>(Result) = appCmdLine();
 }
 
+void UCoopNative::execGetRealTime(FFrame& Stack, void* Result)
+{
+	P_FINISH;
+
+	static DOUBLE StartTime = appSeconds();
+
+	*static_cast<FLOAT*>(Result) = static_cast<FLOAT>(appSeconds() - StartTime);
+}
+
 void UCoopNative::execReleaseAllCDKeys(FFrame& Stack, void* Result)
 {
 	P_FINISH;
@@ -198,6 +207,56 @@ void UCoopNative::execLoadSavedConfig(FFrame& Stack, void* Result)
 
 	debugf("ModCoop: Loading config of %s from '%s'", ConfigClass->GetName(), *Path);
 	ConfigClass->GetDefaultObject()->LoadConfig(0, ConfigClass, *Path);
+
+	// Values read from a file count as unchanged and the config writer comments them out when the file is saved (FConfigFile::Write),
+	// so they were lost after the next start
+	FConfigSection* Section = GConfig->GetSectionPrivate(ConfigClass->GetPathName(), 0, 0, *Path);
+
+	if(Section)
+	{
+		for(FConfigSection::TIterator It(*Section); It; ++It)
+			It.Value().Dirty = true;
+	}
+}
+
+void UCoopNative::execReadSavedString(FFrame& Stack, void* Result)
+{
+	P_GET_STR(IniName);
+	P_GET_STR(Section);
+	P_GET_STR(Key);
+	P_FINISH;
+
+	FString Path = GSavePath * IniName;
+	FString Value;
+
+	if(GConfig->GetFString(*Section, *Key, Value, *Path))
+	{
+		// Mark it as changed, otherwise the next save of the file comments it out (see FConfigFile::Write)
+		GConfig->SetString(*Section, *Key, Value == TEXT("-") ? TEXT("+") : TEXT("-"), *Path);
+		GConfig->SetString(*Section, *Key, *Value, *Path);
+	}
+	else
+	{
+		Value = TEXT("");
+	}
+
+	*static_cast<FString*>(Result) = Value;
+}
+
+void UCoopNative::execWriteSavedString(FFrame& Stack, void* Result)
+{
+	P_GET_STR(IniName);
+	P_GET_STR(Section);
+	P_GET_STR(Key);
+	P_GET_STR(Value);
+	P_FINISH;
+
+	FString Path = GSavePath * IniName;
+
+	// An unchanged value would stay marked as loaded and be written commented out (see FConfigFile::Write)
+	GConfig->SetString(*Section, *Key, Value == TEXT("-") ? TEXT("+") : TEXT("-"), *Path);
+	GConfig->SetString(*Section, *Key, *Value, *Path);
+	GConfig->Flush(0, *IniName); // Files are kept by their name without the path
 }
 
 /*
@@ -246,7 +305,10 @@ static UBOOL __fastcall CTBotTickOverride(AActor* Self, DWORD Edx, FLOAT DeltaTi
 		return 1;
 	}
 
+	// The controller's name ends up in the crash history (host crash in AController::Tick)
+	guard(CoopCTBotTick);
 	return OriginalCTBotTick(Self, Edx, DeltaTime, TickType);
+	unguardf(("%s", Self->GetFullName()));
 }
 
 /*
