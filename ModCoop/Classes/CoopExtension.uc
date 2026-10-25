@@ -30,6 +30,7 @@ var FunctionOverride ActivateItemTransitionOverride; // Effects for the clients 
 var FunctionOverride DispenserTransitionOverride;
 var FunctionOverride FactoryRangeTestOverride;     // Players without a pawn (see FactoryPlayerRangeTest)
 var FunctionOverride FactoryCovertOverride;
+var FunctionOverride FactoryGenerateOverride;
 
 function Init(SWRCFix Fix)
 {
@@ -89,6 +90,8 @@ function Init(SWRCFix Fix)
 	FactoryRangeTestOverride.Init(class'Factory', 'PlayerRangeTest', self, 'FactoryPlayerRangeTest');
 	FactoryCovertOverride = new class'FunctionOverride';
 	FactoryCovertOverride.Init(class'Factory', 'IsLocationCovert', self, 'FactoryIsLocationCovert');
+	FactoryGenerateOverride = new class'FunctionOverride';
+	FactoryGenerateOverride.Init(class'Factory', 'GenerateActor', self, 'FactoryGenerateActor');
 }
 
 /*
@@ -451,6 +454,105 @@ function bool FactoryIsLocationCovert(vector LocationToTest)
 	}
 
 	return true;
+}
+
+// Factory.GenerateActor with SPM_NearPlayer: same code, players without a pawn are skipped (see FactoryPlayerRangeTest)
+function bool FactoryGenerateActor()
+{
+	local Factory F;
+	local PlayerController P;
+	local int i;
+	local int NearestSpawn;
+	local bool bSpawnOK;
+	local float DistToPlayer, TempDist;
+	local int NumInWorld;
+	local Actor Other;
+
+	F = Factory(FactoryGenerateOverride.CurrentSelf);
+	F.RemoveDeadActor();
+
+	if(F.SpawnedActors.Length < F.MaxAlive && (F.RemainingItems > 0 || F.bGenerateForever))
+	{
+		if(F.MaxInWorld > 0)
+		{
+			NumInWorld = 0;
+
+			foreach F.DynamicActors(F.InternalPrototype, Other)
+			{
+				if(!Other.IsA('Pawn') || Pawn(Other).Health > 0)
+					++NumInWorld;
+			}
+
+			if(NumInWorld >= F.MaxInWorld)
+				return false;
+		}
+
+		F.SpawnedActors.Insert(0, 1);
+
+		if(F.SpawnMode == SPM_FromFactory)
+		{
+			if(F.PlayerRangeTest(F.Location))
+			{
+				if(!F.bCovert || F.IsLocationCovert(F.Location))
+				{
+					F.SpawnedActors[0] = F.Spawn(F.InternalPrototype,, F.Tag, F.Location, F.Rotation);
+					bSpawnOK = F.SetupNewActor(F.SpawnedActors[0], None);
+				}
+			}
+		}
+		else if(F.SpawnMode == SPM_NearPlayer)
+		{
+			DistToPlayer = 0.0;
+			NearestSpawn = -1;
+
+			foreach F.DynamicActors(class'PlayerController', P)
+			{
+				if(P.Pawn == None)
+					continue;
+
+				for(i = 0; i < F.SpawnPoints.Length; ++i)
+				{
+					TempDist = VDistSq(P.Pawn.Location, F.SpawnPoints[i].Location);
+
+					if(DistToPlayer == 0.0 || DistToPlayer > TempDist)
+					{
+						if(!F.bCovert || F.IsLocationCovert(F.SpawnPoints[i].Location))
+						{
+							DistToPlayer = TempDist;
+							NearestSpawn = i;
+						}
+					}
+				}
+			}
+
+			if(NearestSpawn >= 0 && F.PlayerRangeTest(F.SpawnPoints[NearestSpawn].Location))
+			{
+				F.SpawnedActors[0] = F.Spawn(F.InternalPrototype,, F.Tag, F.SpawnPoints[NearestSpawn].Location, F.SpawnPoints[NearestSpawn].Rotation);
+				bSpawnOK = F.SetupNewActor(F.SpawnedActors[0], F.SpawnPoints[NearestSpawn]);
+			}
+		}
+		else
+		{
+			if(F.PlayerRangeTest(F.SpawnPoints[F.NextSpawnPoint].Location) && (!F.bCovert || F.IsLocationCovert(F.SpawnPoints[F.NextSpawnPoint].Location)))
+			{
+				F.SpawnedActors[0] = F.Spawn(F.InternalPrototype,, F.Tag, F.SpawnPoints[F.NextSpawnPoint].Location, F.SpawnPoints[F.NextSpawnPoint].Rotation);
+				bSpawnOK = F.SetupNewActor(F.SpawnedActors[0], F.SpawnPoints[F.NextSpawnPoint]);
+			}
+		}
+
+		if(bSpawnOK && !F.bGenerateForever)
+			F.RemainingItems--;
+
+		F.DetermineNextSpawnPoint(bSpawnOK);
+		F.TriggerEvent(F.SpawnEvent, F, None);
+
+		if(F.bStartTimerAfterDeath && F.SpawnedActors.Length >= F.MaxAlive)
+			F.GotoState('Waiting');
+
+		return true;
+	}
+
+	return false;
 }
 
 // Critical messages of scripts are shown by the HUDs on the server, remote clients have none there

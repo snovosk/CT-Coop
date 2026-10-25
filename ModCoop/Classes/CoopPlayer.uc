@@ -55,6 +55,7 @@ var Actor       ClientAttachItem;     // Client only: item in the hand during a 
 var ActivateItem PendingDetonation;   // Server only: charge a client detonates when its hand animation is done (CoopGame.Tick)
 var float       DetonationTime;   // Server only: squad member whose scene this client watches before playing it (see CoopGame.CheckSceneWatch)
 var array<Pawn> SquadIconMembers;     // Client only: see ClientCoopSetSquadState
+var array<int>  SquadIconStates;      // Order icon and marker state of SquadIconMembers, see CoopGame.GetSquadIconState
 var float       WeaponDownTime; // Client only: Level.TimeSeconds since when the weapon is down without being changed
 
 replication
@@ -1019,7 +1020,7 @@ simulated function bool IsDeltaMember(Pawn P)
 }
 
 // Health of other pawns and the squad aren't replicated, the squad icons show them (see CoopGame.SyncSquadHealth)
-simulated function ClientCoopSetSquadState(Pawn P, float NewHealth, bool bSquadMember)
+simulated function ClientCoopSetSquadState(Pawn P, float NewHealth, bool bSquadMember, byte IconX, byte IconY, byte MarkerState)
 {
 	local int i;
 
@@ -1031,11 +1032,38 @@ simulated function ClientCoopSetSquadState(Pawn P, float NewHealth, bool bSquadM
 	for(i = SquadIconMembers.Length - 1; i >= 0; i = i - 1)
 	{
 		if(SquadIconMembers[i] == None || SquadIconMembers[i] == P)
+		{
 			SquadIconMembers.Remove(i, 1);
+			SquadIconStates.Remove(i, 1);
+		}
 	}
 
 	if(bSquadMember)
+	{
+		SquadIconStates[SquadIconMembers.Length] = IconX * 4096 + IconY * 256 + MarkerState;
 		SquadIconMembers[SquadIconMembers.Length] = P;
+	}
+}
+
+// See CoopGame.GetSquadIconState
+simulated function GetSquadIconState(Pawn P, out byte IconX, out byte IconY, out byte MarkerState)
+{
+	local int i;
+
+	IconX = 1;
+	IconY = 4;
+	MarkerState = 0;
+
+	for(i = 0; i < SquadIconMembers.Length; i = i + 1)
+	{
+		if(SquadIconMembers[i] == P)
+		{
+			IconX = SquadIconStates[i] / 4096;
+			IconY = (SquadIconStates[i] / 256) % 16;
+			MarkerState = SquadIconStates[i] % 256;
+			return;
+		}
+	}
 }
 
 simulated function bool IsSquadIconMember(Pawn P)

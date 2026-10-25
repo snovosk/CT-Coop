@@ -101,6 +101,7 @@ var array<name>        EffectPropStates;
 var array<Pawn>        HealthPawns;        // See SyncSquadHealth
 var array<float>       SentHealths;
 var array<byte>        SentSquadMembers;
+var array<int>         SentSquadIcons;      // Order icon and marker state, see GetSquadIconState
 var float              NextSquadStateResend;
 var MissionObjectives  Objectives;          // See SyncObjectives
 var string             SentObjectives;
@@ -1376,6 +1377,7 @@ function TickTest()
 	local ActivateItem A;
 	local ScriptedController SC;
 	local SquadMarker M;
+	local Factory F;
 	local ScriptedSequence SS;
 
 	if(Level.TimeSeconds < TestTime)
@@ -2152,6 +2154,19 @@ function TickTest()
 			return;
 		}
 	}
+	else if(TestAction ~= "factories")
+	{
+		// What the factories have spawned (see CoopExtension.FactoryGenerateActor), every 10 s
+		foreach DynamicActors(class'Factory', F)
+			Log("CoopTest: factories: " $ TestStep $ " " $ F $ " Mode=" $ F.SpawnMode $ " State=" $ F.GetStateName() $ " Alive=" $ F.SpawnedActors.Length $ " Remaining=" $ F.RemainingItems $ " Prototype=" $ F.InternalPrototype);
+
+		if(TestStep < 3)
+		{
+			TestTime = Level.TimeSeconds + 10;
+			++TestStep;
+			return;
+		}
+	}
 	else if(TestAction ~= "squadicons" && TestStep == 0)
 	{
 		// HUD icons of the squad members (see CoopHUD.DrawCoopSquad)
@@ -2420,7 +2435,8 @@ function SyncSquadHealth()
 	local Controller C;
 	local PlayerController Host;
 	local int i;
-	local byte bMember;
+	local byte bMember, IconX, IconY, MarkerState;
+	local int Icon;
 	local bool bResend;
 
 	Host = GetHost();
@@ -2449,17 +2465,21 @@ function SyncSquadHealth()
 				break;
 		}
 
-		if(!bResend && i < HealthPawns.Length && SentHealths[i] == P.Health && SentSquadMembers[i] == bMember)
+		GetSquadIconState(P, IconX, IconY, MarkerState);
+		Icon = IconX * 4096 + IconY * 256 + MarkerState;
+
+		if(!bResend && i < HealthPawns.Length && SentHealths[i] == P.Health && SentSquadMembers[i] == bMember && SentSquadIcons[i] == Icon)
 			continue;
 
 		HealthPawns[i] = P;
 		SentHealths[i] = P.Health;
 		SentSquadMembers[i] = bMember;
+		SentSquadIcons[i] = Icon;
 
 		for(C = Level.ControllerList; C != None; C = C.nextController)
 		{
 			if(CoopPlayer(C) != None && !IsHost(C) && C.Pawn != P)
-				CoopPlayer(C).ClientCoopSetSquadState(P, P.Health, bMember == 1);
+				CoopPlayer(C).ClientCoopSetSquadState(P, P.Health, bMember == 1, IconX, IconY, MarkerState);
 		}
 	}
 
@@ -2470,7 +2490,59 @@ function SyncSquadHealth()
 			HealthPawns.Remove(i, 1);
 			SentHealths.Remove(i, 1);
 			SentSquadMembers.Remove(i, 1);
+			SentSquadIcons.Remove(i, 1);
 		}
+	}
+}
+
+/*
+ * What the helmet shows in the squad icon of a member (see Notes/HelmetHUD.md): the icon of its order and its marker.
+ * MarkerState: 0 = none, 1 = on the way to its marker, 2 + n = n twelfths of the marker's action done (the timer ring).
+ * The squad and the markers only exist on the server. Members played by clients have no orders, they show "form up".
+ */
+function GetSquadIconState(Pawn P, out byte IconX, out byte IconY, out byte MarkerState)
+{
+	local ActivateItem Item, A;
+	local float Duration;
+	local int i;
+
+	IconX = 1;
+	IconY = 4;
+	MarkerState = 0;
+
+	for(i = 0; P.Squad != None && i < P.Squad.SquadMembers.Length; i = i + 1)
+	{
+		if(P.Squad.SquadMembers[i].Pawn == P)
+		{
+			IconX = P.Squad.SquadMembers[i].HUDIconX;
+			IconY = P.Squad.SquadMembers[i].HUDIconY;
+			break;
+		}
+	}
+
+	if(P.SquadMarker != None)
+	{
+		if(P.SquadMarker.bSetupPhase)
+			MarkerState = 1;
+		else
+			Item = ActivateItem(P.SquadMarker.Anchor);
+	}
+	else if(PlayerController(P.Controller) != None)
+	{
+		// A client uses panels himself, without a marker
+		foreach DynamicActors(class'ActivateItem', A)
+		{
+			if(A.User == P.Controller)
+				Item = A;
+		}
+	}
+
+	if(Item != None && Item.DurationRemaining != 0)
+	{
+		Duration = Item.DefaultDuration();
+
+		if(Duration > 0)
+			MarkerState = 2 + int(FClamp((Duration - Item.DurationRemaining) / Duration, 0, 1) * 12);
 	}
 }
 

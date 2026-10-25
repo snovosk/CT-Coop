@@ -4,13 +4,23 @@ A co-op campaign for Star Wars: Republic Commando with a host-authoritative desi
 the host runs a listen server (`?listen`), clients connect to IP:7777. Only the native replication of UE2 is used.
 Custom C++ is used only where the engine crashes or blocks network play on single player maps.
 
-## Status (0.58, cosmetic test build)
+## Status (0.59, test build)
 
 The campaign has been checked up to about the sniper scene on GEO_01C. The Delta squad members go to clients as the story
 goes on (Scorch on GEO_01A, Fixer on GEO_01B); from GEO_01C on, each of three clients has their own squad member. The door
 breach waits until all clients playing squad members are there; the other scenes with the whole squad are not adapted yet.
 
-0.58 only changes what players see. **It has not been tested by hand yet.**
+0.59 (test build, not tested by hand yet):
+- **Squad icons redone from the helmet's machine code** (`UHelmet::DrawHUD` in Engine.dll, see `Notes/HelmetHUD.md`): exact
+  positions and texture parts, the helmet's bent HUD in network games (`Canvas.SetCurvedSurface`), the four health colors
+  (green, yellow, orange, red), the icon of the member's current order, the frame lit while the player aims at the member,
+  the timer ring while the member places a charge or hacks, blinking corners while the member talks. The order and the marker
+  state come from the host (`CoopGame.GetSquadIconState`). Against the helmet's own icons at 800x600, 1280x720 and 1600x900
+  the frame, order icon and arrow match to the pixel.
+- Fixes from the live test of 0.58 (also in the updated 0.58 archive): enemies after Fixer on GEO_01B, the weapon after the
+  detonator, Scorch's speed after the takeover; factories that spawn near the player no longer use players without a pawn.
+
+0.58 only changed what players see:
 - **Squad icons** are back on the host's HUD for the squad members played by clients, and clients see them for every other
   Delta member (`CoopHUD`). The host, 38, has no icon, as in single player. Like the helmet's own icons they show the number,
   the health (green, yellow, red), incapacitation (a red cross) and a small arrow on the frame that points to where the member
@@ -19,8 +29,8 @@ breach waits until all clients playing squad members are there; the other scenes
   after his scene). As in the helmet (`UHelmet::GetSquadPawnHUDPosition` returns `Pawn.SquadHUDSlot`), every member has a
   fixed place: 07, 40, 62 from the left, so a single 62 stands in the third place. The Delta pawns are always relevant so the
   icons of members far away don't disappear.
-  The helmet is laid out for 800x600, stretched to the screen (x with the width, y with the height) and projected onto the
-  curved visor; the icons were fitted against the helmet's own icons on screenshots at 800x600, 1280x720 and 1600x900.
+  The helmet is laid out for 800x600, stretched to the screen (x with the width, y with the height); 0.59 draws them like the
+  helmet does (see above).
 - **Objective tracker** (the ring with distance and direction around the crosshair), the **current objective** text, critical
   messages of scripts, blinking HUD elements, view shakes and screen fades now reach the clients. Level scripts changed them
   for the first player they found (the host) or for players with a HUD on the server only; `CoopExtension` hooks the script
@@ -192,7 +202,9 @@ Versions before 0.4 were called 1.0–1.3 (release 1.3 was renamed to 0.3).
 | Scorch moved slowly and couldn't crouch after the takeover, fine on the next level | His script walked him (`bIsWalking`, `MaximumDesiredSpeed` = 156) and the values stayed on the pawn | `TakeOver` resets walking, analog speed, ground speed and the crouch/jump flags |
 | (live test) The client had no weapon after detonating the charge to Fixer's door | The hands (`HandSignal`) kept playing an animation on the client and stayed in `Active`, while the server had already given the weapon back | Hands that stay active for 3 s without "Use" held go on to `Idle`, which brings the weapon back (`FixHandSignalWeapon`) |
 | Enemy factories got `Accessed None: Pawn` | `Factory.PlayerRangeTest`/`IsLocationCovert` use the pawn of every player controller, players without one (joining, dead) counted as standing at the origin | Hooks with the same code that skip players without a pawn |
+| Factories that spawn near the player (`SPM_NearPlayer`, e.g. falling dust on GEO_01B) logged `Accessed None: Pawn` many times and could pick a spawn point near the origin of the map | `Factory.GenerateActor` looks for the spawn point nearest to every player controller's pawn, also for players without one | Hook with the same code that skips players without a pawn (`CoopExtension.FactoryGenerateActor`). Tested (`CoopTest=factories`): no warnings, the near-player factory spawns all its items |
 | (live test) No enemies in the two rooms after Fixer on GEO_01B (bacta room, room with the door to hack) | The level spawns them after `BrokenDoorDemoUnderway`, the `EventUnderway` of the demolition marker of Fixer's door. A client playing Scorch places the charge himself, the marker isn't started and the event never came (same for `SpawnDemoDroids` on GEO_01A) | When a player activates a panel that belongs to a squad marker the AI isn't doing, the server triggers the marker's `Event` and `EventUnderway` (`SyncPanelStates`); the door breach does the same (`CheckGather`). Tested: `SpawnControlRoom` goes online after the client's detonation |
+| The custom squad icons didn't line up with the helmet's own ones, especially in a grid of 4 windows; no orange health level, no order, no timer ring | The numbers were fitted by eye. The machine code of `UHelmet::DrawHUD` in Engine.dll shows the exact layout, and that in network games the helmet bends its HUD (`FCanvasUtil` curved surface: points pulled to the center by up to 10%) | `CoopHUD` redone from the machine code (see `Notes/HelmetHUD.md`), with `Canvas.SetCurvedSurface`; order icon and marker state from the host (`CoopGame.GetSquadIconState`). Tested against the helmet's icons at 800x600, 1280x720 and 1600x900: frame, order icon and arrow match to the pixel |
 | (live test) Invisible walls on the client in two places, not reproduced yet | — | Diagnostics in the client's log: "Blocked at ... knee=... chest=..." when the pawn doesn't move while the player moves, and "Server corrected the position by ..." for large corrections |
 | The reconnect menu tried only once | a failed `open` from the menu doesn't open `MenuConnectionFailed` | the menu waits for the timeout itself and tries again (up to 12 times) |
 
@@ -216,6 +228,7 @@ windows on one PC (up to 4).
 | Sniper scene GEO_01C with the AI sniper and with a client playing Sev, also with a "too fast" sniper (0.57) | mission success in all three cases |
 | Hacking by a client playing Fixer (GEO_01C), demolition by a client playing Scorch (GEO_01B) (0.57) | door unlocked, charge armed, no crashes |
 | Squad icons, objective tracker, objectives and effects on clients (0.58) | logged and captured on screenshots, not tested by hand |
+| Squad icons (0.59): a copy drawn over the helmet's own icons (`CoopTest=squadicons`) at 800x600, 1280x720, 1600x900; timer ring while a client places the charge on GEO_01B, seen by the host and another client; factories (`CoopTest=factories`) | frame, order icon and arrow hidden completely by the helmet's icons, ring the same for host and client, no factory warnings |
 
 Crashes found by the runs and fixed: see the table above (travel/`TravelPostAccept`, `ClientTravel` without a pawn,
 `InitialClientActor`, briefings, `UpdatePreNet` — an outdated class cache in fix 3, now only `Mover`/`StaticMeshActor`).
