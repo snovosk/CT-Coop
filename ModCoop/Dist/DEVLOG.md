@@ -15,7 +15,10 @@ breach waits until all clients playing squad members are there; the other scenes
   Delta member (`CoopHUD`). The host, 38, has no icon, as in single player. Like the helmet's own icons they show the number,
   the health (green, yellow, red), incapacitation (a red cross) and a small arrow on the frame that points to where the member
   is, seen from the player. Health and incapacitation of other pawns are not replicated, the server sends them
-  (`SyncSquadHealth`); the Delta pawns are always relevant so the icons of members far away don't disappear.
+  (`SyncSquadHealth`) together with who is in the squad, so a member shows up only after joining (Scorch on GEO_01A only
+  after his scene). As in the helmet (`UHelmet::GetSquadPawnHUDPosition` returns `Pawn.SquadHUDSlot`), every member has a
+  fixed place: 07, 40, 62 from the left, so a single 62 stands in the third place. The Delta pawns are always relevant so the
+  icons of members far away don't disappear.
   The helmet is laid out for 800x600, stretched to the screen (x with the width, y with the height) and projected onto the
   curved visor; the icons were fitted against the helmet's own icons on screenshots at 800x600, 1280x720 and 1600x900.
 - **Objective tracker** (the ring with distance and direction around the crosshair), the **current objective** text, critical

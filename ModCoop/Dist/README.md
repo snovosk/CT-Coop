@@ -53,8 +53,10 @@ The default port is **7777 (UDP)**. If the host uses another port, enter `IP:POR
 - Over the plain internet without a VPN, port 7777/UDP has to be forwarded on the host's router.
 
 ### Testing on one computer
-Start the game twice and switch both windows to windowed mode (`Alt+Enter`). Host a co-op game in the first window and
-connect to `127.0.0.1` in the second one. The active window gets the input; switch between them with the mouse.
+Start the game in windowed mode: add `-windowed` to the target of the co-op shortcut (after `CT.exe"`), then start it twice.
+Host a co-op game in the first window and connect to `127.0.0.1` in the second one. The active window gets the input; switch
+between them with the mouse. **Don't press `Alt+Enter`** with several copies of the game running: switching to full screen
+then fails and the game closes with "CreateDevice failed (D3DERR_DEVICELOST)".
 
 ## Co-op rules
 

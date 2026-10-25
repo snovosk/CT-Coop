@@ -99,6 +99,8 @@ var array<Prop>        EffectProps;         // See SyncPropEffects
 var array<name>        EffectPropStates;
 var array<Pawn>        HealthPawns;        // See SyncSquadHealth
 var array<float>       SentHealths;
+var array<byte>        SentSquadMembers;
+var float              NextSquadStateResend;
 var MissionObjectives  Objectives;          // See SyncObjectives
 var string             SentObjectives;
 var float              NextObjectivesResend;
@@ -379,6 +381,43 @@ function bool FindSpawnLocation(vector Center, rotator Dir, out vector OutLocati
 }
 
 /*
+ * Spawns a client's commando on a free spot around a location (from which it is visible). Several spots are tried: the first one
+ * may already be taken by another client (the third client of four couldn't spawn at the start of GEO_01B).
+ */
+function Pawn SpawnCommandoNear(vector Center, rotator Dir)
+{
+	local int Ring, i;
+	local rotator R;
+	local vector Test;
+	local vector HitLocation, HitNormal;
+	local Pawn P;
+
+	Dir.Pitch = 0;
+	Dir.Roll = 0;
+
+	for(Ring = 1; Ring <= 4; ++Ring)
+	{
+		for(i = 0; i < 8; ++i)
+		{
+			// Prefer the spots behind the host
+			R = Dir;
+			R.Yaw += 32768 + (i / 2) * 8192 * (1 - 2 * (i % 2));
+			Test = Center + vector(R) * (Ring * 100.0);
+
+			if(!FastTrace(Test, Center) || Trace(HitLocation, HitNormal, Test - vect(0, 0, 300), Test, false) == None)
+				continue;
+
+			P = Spawn(class'CoopCommando',,, Test, Dir);
+
+			if(P != None)
+				return P;
+		}
+	}
+
+	return None;
+}
+
+/*
  * False while the host is moved by a level script, e.g. riding a gunship during an intro or being interpolated during a cutscene.
  * Clients are not spawned/moved next to the host at that time since they would be left behind in mid air.
  */
@@ -401,7 +440,6 @@ function bool SpawnClient(CoopPlayer CP)
 {
 	local PlayerController Host;
 	local NavigationPoint StartSpot;
-	local vector SpawnLocation;
 	local rotator SpawnRotation;
 	local Pawn P;
 
@@ -454,18 +492,15 @@ function bool SpawnClient(CoopPlayer CP)
 			Log("CoopGame: Waiting for the host to be free before spawning a client: Physics=" $ Host.Pawn.Physics $ " Base=" $ Host.Pawn.Base $ " Health=" $ Host.Pawn.Health);
 			return false;
 		}
-		SpawnRotation = Host.Pawn.Rotation;
-
-		if(FindSpawnLocation(Host.Pawn.Location, SpawnRotation, SpawnLocation))
-			P = Spawn(class'CoopCommando',,, SpawnLocation, SpawnRotation);
+		P = SpawnCommandoNear(Host.Pawn.Location, Host.Pawn.Rotation);
 	}
 
 	if(P == None) // Fall back to the player starts
 	{
 		StartSpot = FindPlayerStart(CP, 1);
 
-		if(StartSpot != None && FindSpawnLocation(StartSpot.Location, StartSpot.Rotation, SpawnLocation))
-			P = Spawn(class'CoopCommando',,, SpawnLocation, StartSpot.Rotation);
+		if(StartSpot != None)
+			P = SpawnCommandoNear(StartSpot.Location, StartSpot.Rotation);
 	}
 
 	if(P == None)
@@ -2095,6 +2130,41 @@ function TickTest()
 
 		Log("CoopTest: squadicons: host slot=" $ Host.Pawn.SquadHUDSlot $ " leader=" $ Host.Pawn.Squad.SquadLeader);
 	}
+	else if(TestAction ~= "propinfo")
+	{
+		// Destructible props on the server and on the clients; step 2 destroys the props with CoopTestProp in their tag or name
+		foreach AllActors(class'Actor', A2)
+		{
+			if(Prop(A2) != None)
+				Log("CoopTest: propinfo: server " $ TestStep $ " " $ A2 $ " Tag=" $ A2.Tag $ " State=" $ A2.GetStateName() $ " Collide=" $ A2.bCollideActors $ A2.bBlockActors $ A2.bBlockPlayers $ " Hidden=" $ A2.bHidden $ " Mesh=" $ A2.StaticMesh $ " Role=" $ A2.RemoteRole $ " Static=" $ A2.bStatic $ " NoDelete=" $ A2.bNoDelete $ " Relevant=" $ A2.bAlwaysRelevant $ " Physics=" $ A2.Physics $ " Loc=" $ A2.Location $ " Rot=" $ A2.Rotation);
+		}
+
+		for(C = Level.ControllerList; C != None; C = C.nextController)
+		{
+			if(CoopPlayer(C) != None && !IsHost(C))
+				CoopPlayer(C).ClientCoopDumpProps(TestStep);
+		}
+
+		if(TestStep == 1 && ParseOption(TestOptions, "CoopTestProp") != "")
+		{
+			foreach AllActors(class'Actor', A2)
+			{
+				if(Prop(A2) != None && (InStr(Caps(string(A2.Tag)), Caps(ParseOption(TestOptions, "CoopTestProp"))) != -1 || InStr(Caps(string(A2)), Caps(ParseOption(TestOptions, "CoopTestProp"))) != -1))
+				{
+					Log("CoopTest: propinfo: destroying " $ A2);
+					A2.Trigger(self, Host.Pawn);
+					A2.TakeDamage(100000, Host.Pawn, A2.Location, vect(0,0,0), class'DamageType');
+				}
+			}
+		}
+
+		if(TestStep < 2)
+		{
+			TestTime = Level.TimeSeconds + 8;
+			++TestStep;
+			return;
+		}
+	}
 	else if(TestAction ~= "squadinfo")
 	{
 		// Logs the commandos of the level and their squads every 2 seconds
@@ -2312,12 +2382,22 @@ function bool IsScriptBusy(Pawn P)
 	return !SC.SequenceScript.Actions[SC.ActionNum].IsA('ACTION_WaitForEvent');
 }
 
-// Health of the commandos for the squad icons of the clients (CoopHUD.DrawCoopSquad)
+// Health of the commandos and who is in the squad, for the squad icons of the clients (CoopHUD.DrawCoopSquad). Sent when it changes
+// and every 5 seconds for clients that joined later.
 function SyncSquadHealth()
 {
 	local Pawn P;
 	local Controller C;
+	local PlayerController Host;
 	local int i;
+	local byte bMember;
+	local bool bResend;
+
+	Host = GetHost();
+	bResend = Level.TimeSeconds >= NextSquadStateResend;
+
+	if(bResend)
+		NextSquadStateResend = Level.TimeSeconds + 5;
 
 	foreach DynamicActors(class'Pawn', P)
 	{
@@ -2327,22 +2407,29 @@ function SyncSquadHealth()
 		// The squad icons of the clients show every member, also the ones far away
 		P.bAlwaysRelevant = true;
 
+		// Squad members played by clients are not in the AI squad (see DetachClientMembers)
+		bMember = 0;
+
+		if(PlayerController(P.Controller) != None || (Host != None && Host.Pawn != None && Host.Pawn.Squad != None && P.Squad == Host.Pawn.Squad))
+			bMember = 1;
+
 		for(i = 0; i < HealthPawns.Length; i = i + 1)
 		{
 			if(HealthPawns[i] == P)
 				break;
 		}
 
-		if(i < HealthPawns.Length && SentHealths[i] == P.Health)
+		if(!bResend && i < HealthPawns.Length && SentHealths[i] == P.Health && SentSquadMembers[i] == bMember)
 			continue;
 
 		HealthPawns[i] = P;
 		SentHealths[i] = P.Health;
+		SentSquadMembers[i] = bMember;
 
 		for(C = Level.ControllerList; C != None; C = C.nextController)
 		{
 			if(CoopPlayer(C) != None && !IsHost(C) && C.Pawn != P)
-				CoopPlayer(C).ClientCoopSetPawnHealth(P, P.Health);
+				CoopPlayer(C).ClientCoopSetSquadState(P, P.Health, bMember == 1);
 		}
 	}
 
@@ -2352,6 +2439,7 @@ function SyncSquadHealth()
 		{
 			HealthPawns.Remove(i, 1);
 			SentHealths.Remove(i, 1);
+			SentSquadMembers.Remove(i, 1);
 		}
 	}
 }
@@ -2826,7 +2914,8 @@ function CheckSceneWatch()
 			SetAssignment(Best, string(P.Class));
 		}
 
-		StartWatching(Best, P, bFirstTime);
+		// The camera always flies to a member that joins the squad in its scene, also for a client that played it before
+		StartWatching(Best, P, true);
 	}
 }
 
@@ -3002,17 +3091,21 @@ function PlayerController FindAssignedPlayer(Pawn P)
 // The squad member the client played before if it is in the level, even if it is not free yet
 function Pawn FindAssignedMemberInLevel(CoopPlayer CP)
 {
+	local PlayerController Host;
 	local string MemberClass;
 	local Pawn P;
 
 	MemberClass = GetAssignedClass(CP);
+	Host = GetHost();
 
-	if(MemberClass == "" || !bClientsTakeOverSquad)
+	if(MemberClass == "" || !bClientsTakeOverSquad || Host == None || Host.Pawn == None || Host.Pawn.Squad == None)
 		return None;
 
+	// Only a member that is already in the squad (e.g. busy with a script at the start of GEO_01C). One that joins later in this
+	// level (Fixer on GEO_01B) is handed over in its scene (CheckSceneWatch); until then the client plays its own commando.
 	foreach DynamicActors(class'Pawn', P)
 	{
-		if(string(P.Class) ~= MemberClass && P.Health > 0 && PlayerController(P.Controller) == None)
+		if(string(P.Class) ~= MemberClass && P.Health > 0 && PlayerController(P.Controller) == None && P.Squad == Host.Pawn.Squad)
 			return P;
 	}
 

@@ -45,8 +45,12 @@ simulated function DrawCoopSquad(Canvas C)
 		else
 			continue;
 
-		// The host's helmet already shows the AI members
+		// The host's helmet already shows the AI members; clients only show members that joined the squad (not e.g. Scorch on GEO_01A
+		// before his scene)
 		if(Level.NetMode != NM_Client && PlayerController(P.Controller) == None)
+			continue;
+
+		if(Level.NetMode == NM_Client && (CoopPlayer(PlayerOwner) == None || !CoopPlayer(PlayerOwner).IsSquadIconMember(P)))
 			continue;
 
 		X = (79 + Slot * 40.4) * ScaleX;

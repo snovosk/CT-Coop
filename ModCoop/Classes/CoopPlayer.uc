@@ -49,6 +49,7 @@ var bool        bPlayedHandSignalAnim;
 var Actor       ClientAttachItem;     // Client only: item in the hand during a hand signal (see SetupClientHandSignal)
 var ActivateItem PendingDetonation;   // Server only: charge a client detonates when its hand animation is done (CoopGame.Tick)
 var float       DetonationTime;   // Server only: squad member whose scene this client watches before playing it (see CoopGame.CheckSceneWatch)
+var array<Pawn> SquadIconMembers;     // Client only: see ClientCoopSetSquadState
 var float       WeaponDownTime; // Client only: Level.TimeSeconds since when the weapon is down without being changed
 
 replication
@@ -56,9 +57,9 @@ replication
 	reliable if(Role == ROLE_Authority)
 		ClientCoopMessage, ClientCoopPawnRevived, ClientCoopSetIncapacitated, ClientCoopSetIdleState, ClientCoopSetPanelState, ClientCoopTakeoverCamera, ClientCoopSetActorCollision;
 	reliable if(Role == ROLE_Authority)
-		ClientCoopObjectiveTracker, ClientCoopBlinkHUD, ClientCoopShakeView, ClientCoopScreenFade, ClientCoopCriticalMessage, ClientCoopSetObjectives;
+		ClientCoopDumpProps, ClientCoopObjectiveTracker, ClientCoopBlinkHUD, ClientCoopShakeView, ClientCoopScreenFade, ClientCoopCriticalMessage, ClientCoopSetObjectives;
 	unreliable if(Role == ROLE_Authority)
-		ClientCoopSetPawnHealth, ClientCoopSpawnEffect, ClientCoopSetActorDisplay, ClientCoopSetPanelLinks, ClientCoopSetPanelProgress;
+		ClientCoopSetSquadState, ClientCoopSpawnEffect, ClientCoopSetActorDisplay, ClientCoopSetPanelLinks, ClientCoopSetPanelProgress;
 	reliable if(Role < ROLE_Authority)
 		ServerTeleportToHost, ServerCoopSetTarget, ServerCoopUsingItem, ServerCoopUsePanel, ServerCoopStartHandSignal;
 }
@@ -938,11 +939,37 @@ simulated function bool IsDeltaMember(Pawn P)
 	return P.IsA('Commando07Delta') || P.IsA('Commando40Delta') || P.IsA('Commando62Delta');
 }
 
-// Health of other pawns isn't replicated, the squad icons show it (see CoopGame.SyncSquadHealth)
-simulated function ClientCoopSetPawnHealth(Pawn P, float NewHealth)
+// Health of other pawns and the squad aren't replicated, the squad icons show them (see CoopGame.SyncSquadHealth)
+simulated function ClientCoopSetSquadState(Pawn P, float NewHealth, bool bSquadMember)
 {
-	if(P != None && P.Role < ROLE_Authority)
-		P.Health = NewHealth;
+	local int i;
+
+	if(P == None || P.Role == ROLE_Authority)
+		return;
+
+	P.Health = NewHealth;
+
+	for(i = SquadIconMembers.Length - 1; i >= 0; i = i - 1)
+	{
+		if(SquadIconMembers[i] == None || SquadIconMembers[i] == P)
+			SquadIconMembers.Remove(i, 1);
+	}
+
+	if(bSquadMember)
+		SquadIconMembers[SquadIconMembers.Length] = P;
+}
+
+simulated function bool IsSquadIconMember(Pawn P)
+{
+	local int i;
+
+	for(i = 0; i < SquadIconMembers.Length; i = i + 1)
+	{
+		if(SquadIconMembers[i] == P)
+			return true;
+	}
+
+	return false;
 }
 
 // Emitters are not replicated: effects of doors, panels, droid dispensers and props the server spawned (see CoopGame.ForwardEffect)
@@ -1020,6 +1047,18 @@ simulated function ClientCoopSetObjectives(MissionObjectives O, string States, i
 
 	O.CurrentObjective = Current;
 	Objectives = O;
+}
+
+// Test propinfo (CoopGame.TickTest): the props as the client sees them
+simulated function ClientCoopDumpProps(int Step)
+{
+	local Actor A;
+
+	foreach AllActors(class'Actor', A)
+	{
+		if(Prop(A) != None)
+			Log("CoopTest: propinfo: client " $ Step $ " " $ A $ " Tag=" $ A.Tag $ " State=" $ A.GetStateName() $ " Collide=" $ A.bCollideActors $ A.bBlockActors $ A.bBlockPlayers $ " Hidden=" $ A.bHidden $ " Mesh=" $ A.StaticMesh $ " Role=" $ A.Role $ " Physics=" $ A.Physics $ " Loc=" $ A.Location $ " Rot=" $ A.Rotation);
+	}
 }
 
 // See CoopGame.SyncPanelStates: progress of planting a charge, hacking etc. shown by the HUD
