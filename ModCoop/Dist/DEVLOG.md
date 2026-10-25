@@ -1,221 +1,258 @@
-# ModCoop — журнал разработки
+# ModCoop — development log
 
-Кооперативная кампания Star Wars: Republic Commando по схеме host-authoritative:
-хост — listen-сервер (`?listen`), клиенты подключаются по IP:7777. Используется только родная репликация UE2.
-Свой C++ — только там, где движок падает или блокирует сетевую игру на SP-картах.
+A co-op campaign for Star Wars: Republic Commando with a host-authoritative design:
+the host runs a listen server (`?listen`), clients connect to IP:7777. Only the native replication of UE2 is used.
+Custom C++ is used only where the engine crashes or blocks network play on single player maps.
 
-## Состояние (0.57, промежуточная тестовая сборка)
+## Status (0.58, cosmetic test build)
 
-Кампания проверена примерно до сцены со снайпером на GEO_01C. Бойцы Дельты по ходу сюжета переходят клиентам
-(Скорч на GEO_01A, Фиксер на GEO_01B), с GEO_01C у каждого из трёх клиентов свой боец. Штурм двери ждёт, пока соберутся
-все клиенты-бойцы; остальные сцены со всем отрядом пока не адаптированы.
+The campaign has been checked up to about the sniper scene on GEO_01C. The Delta squad members go to clients as the story
+goes on (Scorch on GEO_01A, Fixer on GEO_01B); from GEO_01C on, each of three clients has their own squad member. The door
+breach waits until all clients playing squad members are there; the other scenes with the whole squad are not adapted yet.
 
-Изменения после 0.55 (вошли в 0.57):
-- сцену появления бойца клиент смотрит от первого лица бойца (сглаженная камера, модель скрыта), а не со стороны;
-- после «Add squad member» сцена обрывается: клиент сразу получает бойца, переход бота на следующую точку (Фиксер шёл ~750 ед.
-  к пульту) срезан, события из пропущенной части скрипта (`trigger event`, цели) выполняются сразу (`RunSkippedActions`);
-- штурм двери (`MarkerDoorBreach`): хост отдаёт приказ как обычно, всем пишется «Delta, gather at the door (X/N)», когда все
-  клиенты-бойцы ближе 600 ед. к двери — заряд ставится, дверь взрывается (`CheckGather`);
-- свободный боец отряда достаётся ближайшему клиенту без бойца на любом расстоянии (раньше нужно было подойти на 500 ед.;
-  на GEO_01C клиент, появившийся на балконе, не мог спуститься к Скорчу);
-- после смены уровня игра стоит на паузе, пока не вернутся все клиенты прошлого уровня (не дольше `MaxClientWait`=60 с), чтобы
-  никто не пропустил стартовую катсцену;
-- сцена снайпера GEO_01C проходит в обоих вариантах: стреляет бот (Сев у ИИ) и Сева играет клиент — при показанном маркере
-  клиенту пишется «Take the sniper position», у ящика снайпера сервер сам даёт `InSnipePosition` (`CheckClientSnipers`).
-  Исход сцены решает этот флаг в момент взлёта корабля, а не попадание (корабль неуязвим);
-- защита от гонок скриптов (`CheckMissedEvents`): если скрипт начал ждать событие, которое другой скрипт уже дал за последние
-  30 с, событие передаётся ему (только при первом ожидании этого события). На GEO_01C при быстром снайпере Сан Фак пропускал
-  `SunFacRunToShip` и сцена стояла навсегда — вероятно, поэтому в ручных тестах «бот не стрелял»;
-- сглаживание NPC у клиентов (`SmoothProxies`): ошибка видимой позиции летающих джеонозианцев при пинге 50–90 мс упала
-  с 60–134 до 21–29 ед.
+0.58 only changes what players see. **It has not been tested by hand yet.**
+- **Squad icons** are back on the host's HUD for the squad members played by clients, and clients see them for every other
+  Delta member (`CoopHUD`). The host, 38, has no icon, as in single player. Like the helmet's own icons they show the number,
+  the health (green, yellow, red), incapacitation (a red cross) and a small arrow on the frame that points to where the member
+  is, seen from the player. Health and incapacitation of other pawns are not replicated, the server sends them
+  (`SyncSquadHealth`); the Delta pawns are always relevant so the icons of members far away don't disappear.
+  The helmet is laid out for 800x600, stretched to the screen (x with the width, y with the height) and projected onto the
+  curved visor; the icons were fitted against the helmet's own icons on screenshots at 800x600, 1280x720 and 1600x900.
+- **Objective tracker** (the ring with distance and direction around the crosshair), the **current objective** text, critical
+  messages of scripts, blinking HUD elements, view shakes and screen fades now reach the clients. Level scripts changed them
+  for the first player they found (the host) or for players with a HUD on the server only; `CoopExtension` hooks the script
+  actions and forwards them (`ClientCoopObjectiveTracker`, `ClientCoopSetObjectives`, `ClientCoopCriticalMessage`, ...).
+- **Effects of map actors on clients:** emitters are not replicated (`RemoteRole=ROLE_None`), so clients saw no explosion when
+  a door was breached, no shattering window, no destroyed props. The server forwards the effects of `ActivateItem` and
+  `DroidDispenser` state changes and of damaged and destroyed props (`ForwardEffect`, `SyncPropEffects`). Effects that clients
+  spawn themselves (weapons, grenades) are not forwarded, so nothing appears twice.
 
-## Архитектура
+Changes after 0.55 (released in 0.57):
+- the scene in which a squad member joins is seen through the member's eyes (smoothed camera, the model is hidden) instead of
+  from the side;
+- the scene ends at "Add squad member": the client gets the member right away, the walk of the bot to its next position (Fixer
+  walked about 750 units to the panel) is cut, and the events of the skipped part of the script (`trigger event`, objectives)
+  are triggered at once (`RunSkippedActions`);
+- door breach (`MarkerDoorBreach`): the host gives the order as usual, everybody sees "Delta, gather at the door (X/N)", and
+  once all clients playing squad members are closer than 600 units to the door, the charge is placed and the door is blown
+  (`CheckGather`);
+- a free squad member goes to the closest client without one, at any distance (before, the client had to come within 500
+  units; on GEO_01C a client who spawned on the balcony couldn't get down to Scorch);
+- after a level change the game is paused until all clients of the last level are back (at most `MaxClientWait` = 60 s), so
+  nobody misses the intro cutscene;
+- the sniper scene on GEO_01C works in both variants: the AI shoots (Sev played by the AI) or a client plays Sev — once the
+  marker is shown the client sees "Take the sniper position", and next to the sniper crate the server triggers
+  `InSnipePosition` itself (`CheckClientSnipers`). The outcome of the scene depends on this flag when the ship takes off, not on
+  a hit (the ship is invulnerable);
+- protection against script races (`CheckMissedEvents`): if a script starts waiting for an event that another script sent
+  within the last 30 s, the event is passed on to it (only the first time it waits for that event). On GEO_01C, with a fast
+  sniper, Sun Fac missed `SunFacRunToShip` and the scene stopped forever — most likely why "the AI sniper didn't shoot" in the
+  manual tests;
+- smoothing of NPCs on clients (`SmoothProxies`): the error of the visible position of flying Geonosians at a ping of 50–90 ms
+  went down from 60–134 to 21–29 units.
 
-| Компонент | Где | Что делает |
+## Architecture
+
+| Component | Where | What it does |
 |---|---|---|
-| `ModCoop.CoopGame` | сервер | Игровой режим, наследник `CTGameInfoSP`. Хост играет как в SP. Клиентов спавнит рядом с хостом, возрождает, поднимает таймер «раненого», подтягивает отставших, делает все переходы через `ServerTravel`. |
-| `ModCoop.CoopPlayer` | оба | `CTPlayer` для кооператива. Клиент не забирает себе отряд (`AssignSquadMembers` пропускается). Хост в сети может перезапустить уровень (в движке `RestartLevel`/`LoadGame` работают только в standalone). На клиенте: создание недостающих команд, запоминание адреса хоста. |
-| `ModCoop.CoopCommando` | оба | Пешка клиента: `PlayerCommando` без SP-событий `PlayerIncapacitated`/`PlayerRevived`, не входит в отряд, цветная MP-броня (реплицируемый индекс скина), `bCannotDie` (ранение вместо смерти, как у хоста). |
-| `ModCoop.CoopFixes` | хост | Перехваты SP-скриптов через `Mod.FunctionOverride`: `ACTION_ChangeLevel` (переход с сохранением `?game`/`?listen`), `CTDebriefingInfo.OnAButton` (`open <map>` → `ServerTravel`), `PlayerCommando.TravelPostAccept` (безопасная версия, см. баги). |
-| `ModCoop.CoopExtension` | оба | Грузится Mod-ом при старте (`SWRCFix.ExtensionClasses`). Пункты CO-OP в меню мультиплеера, автопереподключение, установка нативных клиентских исправлений. |
-| Меню | клиент/хост | `CoopMultiplayerMenu` (замена `CTMultiplayerPCMenu`), `CoopHostMenu`, `CoopJoinMenu` (5 последних адресов в `ModCoop.ini`), `CoopReconnectMenu`. |
-| `ModCoop.dll` (`CoopNative`) | оба | `ServerPackages` в памяти, снятие CD-ключей, таймауты соединения в памяти, нативные исправления клиента (ниже). |
+| `ModCoop.CoopGame` | server | The game type, a subclass of `CTGameInfoSP`. The host plays as in single player. Clients are spawned next to the host, respawned, get the "wounded" timer, are moved to the host when left behind; all level changes use `ServerTravel`. |
+| `ModCoop.CoopPlayer` | both | `CTPlayer` for co-op. A client doesn't take over the squad (`AssignSquadMembers` is skipped). The host can restart the level in a network game (the engine's `RestartLevel`/`LoadGame` only work in standalone). On clients: creates the missing teams, remembers the host's address. |
+| `ModCoop.CoopCommando` | both | A client's own pawn: `PlayerCommando` without the single player events `PlayerIncapacitated`/`PlayerRevived`, not part of the squad, colored multiplayer armor (replicated skin index), `bCannotDie` (wounded instead of dead, like the host). |
+| `ModCoop.CoopHUD` | both | `CTHUD` that adds the squad icons the helmet doesn't draw (squad members played by clients on the host, all other Delta members on clients). |
+| `ModCoop.CoopFixes` | host | Hooks of single player scripts with `Mod.FunctionOverride`: `ACTION_ChangeLevel` (level change that keeps `?game`/`?listen`), `CTDebriefingInfo.OnAButton` (`open <map>` → `ServerTravel`), `PlayerCommando.TravelPostAccept` (a safe version, see the bugs). |
+| `ModCoop.CoopExtension` | both | Loaded by Mod at startup (`SWRCFix.ExtensionClasses`). CO-OP entries in the multiplayer menu, automatic reconnect, installs the native client fixes, hooks of script actions that change the HUD or spawn effects. |
+| Menus | client/host | `CoopMultiplayerMenu` (replaces `CTMultiplayerPCMenu`), `CoopHostMenu`, `CoopJoinMenu` (the last 5 addresses in `ModCoop.ini`), `CoopReconnectMenu`. |
+| `ModCoop.dll` (`CoopNative`) | both | `ServerPackages` in memory, releasing CD keys, connection timeouts and net rates in memory, reading and writing saved settings, the native client fixes (below). |
 
-Изменения в существующих проектах репозитория:
-- **Mod**: `SWRCFixExtension` + `SWRCFix.ExtensionClasses`/`RedirectMenuClass` (подключаемые расширения и перенаправление меню;
-  без ModCoop список просто пропускается). `FunctionOverride.Init` снимает предыдущий активный перехват той же функции —
-  иначе при смене уровня новый перехват мог запомнить старый как «оригинал» и уйти в рекурсию.
-- **CT (Launcher)**: `-forcelogflush` теперь реально пишет лог построчно.
-- **Все проекты**: `/EHa` (см. «Сборка»).
-- **UCC.ini**: `EditPackages+=ModCoop` и секция `[UCC.Make] AutoLoad+=...` (родительские классы из пакетов игры).
+Changes to existing projects of the repository:
+- **Mod**: `SWRCFixExtension` + `SWRCFix.ExtensionClasses`/`RedirectMenuClass` (pluggable extensions and menu redirection;
+  without ModCoop the list is simply skipped). `FunctionOverride.Init` removes an earlier active hook of the same function —
+  otherwise, after a level change, a new hook could store the old one as the "original" and recurse.
+- **CT (Launcher)**: `-forcelogflush` now really writes the log line by line.
+- **All projects**: `/EHa` (see "Building").
+- **UCC.ini**: `EditPackages+=ModCoop` and the section `[UCC.Make] AutoLoad+=...` (parent classes from the game's packages).
 
-Ванильная совместимость: файлы игры не изменяются, `System.ini` не правится. `SWRepublicCommando.exe` работает как раньше.
-`ModCoop` добавляется в `ServerPackages` только в памяти и только для кооп-сервера (обычное меню мультиплеера его убирает).
+Compatibility with the original game: no game files are changed, `System.ini` is not edited. `SWRepublicCommando.exe` works as
+before. `ModCoop` is added to `ServerPackages` only in memory and only for a co-op server (the normal multiplayer menu removes it).
 
-## Сборка
+## Building
 
-Репозиторий должен лежать в папке игры как `Code` (рядом с `GameData`).
+The repository has to be in the game folder as `Code` (next to `GameData`).
 
-1. **C++**: `build.bat release` из «Developer Command Prompt» Visual Studio (проверено на VS 2026, набор v145, x86).
-   Решение сконвертировано из VS 2003 (`devenv CT.sln /upgrade`), исходные `.vcproj` лежат в `Backup`.
-   `build.bat` переведён на переводы строк CRLF (с LF `cmd` его не выполнял).
-   Во всех проектах включены `/EHa` и статическая CRT `/MT` (игрокам не нужен VC++ Redistributable): с ним `catch(...)` ловит access violation, и обработчик ошибок UE2 показывает стек.
-   Если в системе установлен `NoDefaultCurrentDirectoryInExePath`, батник вызывается как `.\build.bat release`.
-2. **UnrealScript**: из `GameData\System`: `UCC.exe make -silent -ini=..\..\Code\UCC\UCC.ini`.
-   Собираются только пакеты без `.u`, поэтому перед сборкой удалите `Mod.u` и `ModCoop.u`.
-   Порядок важен: **сначала DLL, потом `make`** — иначе UCC зависает на окне «не удалось привязать native-функцию».
-   UCC сам перегенерирует `ModCoop/Inc/ModCoopClasses.h` и `Mod/Inc/ModClasses.h`. Если менялись native-поля или функции,
-   после `make` пересоберите DLL ещё раз.
-   Внимание: в `[Editor.EditorEngine] EditPackages` нельзя добавлять пакеты игры, если рядом лежат их выгруженные
-   исходники (`ucc batchexport`). Make попытается их перекомпилировать. Для зависимостей используйте `[UCC.Make] AutoLoad+=`.
-3. **Тест на одном ПК** (без батников): хост
+1. **C++**: `build.bat release` from the Visual Studio "Developer Command Prompt" (tested with VS 2026, toolset v145, x86).
+   The solution was converted from VS 2003 (`devenv CT.sln /upgrade`); the original `.vcproj` files are in `Backup`.
+   `build.bat` uses CRLF line endings (`cmd` didn't run it with LF).
+   All projects use `/EHa` and the static CRT `/MT` (players don't need the VC++ Redistributable): with `/EHa`, `catch(...)`
+   catches access violations and the UE2 error handler shows the call stack.
+   If `NoDefaultCurrentDirectoryInExePath` is set on the system, call the batch file as `.\build.bat release`.
+2. **UnrealScript**: from `GameData\System`: `UCC.exe make -silent -ini=..\..\Code\UCC\UCC.ini`.
+   Only packages without a `.u` file are built, so delete `Mod.u` and `ModCoop.u` before building.
+   The order matters: **first the DLL, then `make`** — otherwise UCC hangs on the "failed to bind native function" dialog.
+   UCC regenerates `ModCoop/Inc/ModCoopClasses.h` and `Mod/Inc/ModClasses.h` itself. If native fields or functions changed,
+   build the DLL again after `make`.
+   Note: don't add the game's packages to `[Editor.EditorEngine] EditPackages` while their exported sources
+   (`ucc batchexport`) are next to them. Make would try to recompile them. Use `[UCC.Make] AutoLoad+=` for dependencies.
+3. **Test on one PC**: host
    `CT.exe "GEO_01A?game=ModCoop.CoopGame?listen?MaxPlayers=2" -windowed -forcelogflush -CoopNoSetup LOG=CoopHost.log`,
-   клиент `CT.exe "Entry?Menu=ModCoop.CoopJoinMenu" -CoopConnect=127.0.0.1 -windowed -forcelogflush -CoopNoSetup LOG=CoopClient.log`.
-4. **Архив**: `powershell -ExecutionPolicy Bypass -File ModCoop\package.ps1` → `SWRC-Coop-1.0.zip` рядом с `Code`.
+   client `CT.exe "Entry?Menu=ModCoop.CoopJoinMenu" -CoopConnect=127.0.0.1 -windowed -forcelogflush -CoopNoSetup LOG=CoopClient.log`.
+4. **Archive**: `README.md`, `README.ru.md`, `DEVLOG.md` and `System\CT.exe`, `Mod.dll`, `Mod.int`, `Mod.u`, `ModCoop.dll`,
+   `ModCoop.u`, `PropertyOverrides\*` in `SWRC-Coop-<version>.zip`.
 
-## Нативные исправления (почему C++)
+## Native fixes (why C++)
 
-Все найдены по стеку вызовов (`History:` в логе) при реальных запусках хост + клиент.
+All of them were found from the call stack (`History:` in the log) in real host + client runs.
 
-1. **ИИ на клиенте** — `ULocalSituation::Assess <- AController::Tick` (NetMode=3). Движок оставляет на клиенте
-   локальные копии некоторых SP-пешек (например, турели канонерки в GEO_01A) вместе с их `CTBot`, а данные ИИ есть
-   только на сервере. Исправление: в vtable `ACTBot` слот `Tick` (найден сравнением с экспортом `AController::Tick`
-   в vtable `AController`) заменён: на клиенте ИИ не тикает. На сервере вызывается оригинал.
-2. **Команды на клиенте** — `APawn::GetRelationTowards <- CTPlayer.PlayerTick`. SP использует 10 команд, а нативная
-   репликация `GameReplicationInfo` отдаёт только MP-команды. Отношения команд — константы классов, поэтому клиент
-   создаёт недостающие `TeamInfo` локально (`CoopPlayer.EnsureClientTeams`, чистый UnrealScript).
-3. **«Статические» актёры, ставшие динамическими** — `InitialClientActor <- UActorChannel::ReceivedBunch (Actor None)`.
-   В SP-картах у некоторых `Mover`/`StaticMeshActor` дизайнеры сняли `bStatic`/`bNoDelete`. Сервер реплицирует их как
-   новые актёры, клиент не может их заспавнить, т.к. умолчания класса запрещают спавн. Исправление: на клиенте на время
-   `UTcpNetDriver::TickDispatch` флаги снимаются с умолчаний таких классов и возвращаются после. Сканирование всех
-   50 уровней: такие актёры есть на 20 картах (от 1 до 101 шт., больше всего YYY_06C).
-4. **Сохранение** — `UGameEngine::SaveGame` (и консольная `SaveGame`) в сетевом режиме ничего не пишет. Прямой вызов
-   экспортированной функции тоже не создаёт файл. Обход потребовал бы реверса бинарника — не делал (см. «Не вошло»).
-5. **Таймауты** — в `System.ini` 120/150 с: клиент «висел» 2 минуты после вылета хоста. ModCoop выставляет в памяти
-   15 с на клиенте и 30 с на сервере (через reflection-свойства драйвера, `System.ini` не меняется).
+1. **AI on clients** — `ULocalSituation::Assess <- AController::Tick` (NetMode=3). The engine keeps local copies of some
+   single player pawns on clients (e.g. the gunship turrets on GEO_01A) together with their `CTBot`, but the AI data only
+   exists on the server. Fix: the `Tick` slot in the vtable of `ACTBot` (found by comparing with the export
+   `AController::Tick` in the vtable of `AController`) is replaced: on clients the AI doesn't tick. On the server the original
+   is called, with the bot's name in the crash history (`CoopCTBotTick`).
+2. **Teams on clients** — `APawn::GetRelationTowards <- CTPlayer.PlayerTick`. Single player uses 10 teams, but the native
+   replication of `GameReplicationInfo` only sends the multiplayer teams. Team relations are class constants, so the client
+   creates the missing `TeamInfo` actors locally (`CoopPlayer.EnsureClientTeams`, plain UnrealScript).
+3. **"Static" actors that became dynamic** — `InitialClientActor <- UActorChannel::ReceivedBunch (Actor None)`.
+   On single player maps the designers cleared `bStatic`/`bNoDelete` on some `Mover`/`StaticMeshActor` actors. The server
+   replicates them as new actors, and the client can't spawn them because the class defaults forbid it. Fix: on clients the
+   flags are cleared on the defaults of these classes during `UTcpNetDriver::TickDispatch` and restored afterwards. A scan of
+   all 50 levels: such actors exist on 20 maps (1 to 101 of them, most on YYY_06C).
+4. **Saving** — `UGameEngine::SaveGame` (and the console command `SaveGame`) writes nothing in network mode. Calling the
+   exported function directly doesn't create a file either. A workaround would need reverse engineering of the binary — not
+   done (see "Left out").
+5. **Timeouts** — `System.ini` has 120/150 s: the client "hung" for 2 minutes after the host crashed. ModCoop sets 15 s on the
+   client and 30 s on the server in memory (through the driver's reflection properties, `System.ini` isn't changed).
+6. **Saved settings** — the config writer of RC comments out (`;  `) values that were read from `Save\ModCoop.ini`, so they
+   were lost after the next start, and `StaticSaveConfig` put a changed string back to the value saved first.
+   `CoopNative.LoadSavedConfig` marks the values it read as changed; the lists are written with
+   `CoopNative.Read/WriteSavedString` to their own section `[ModCoop.Lists]`.
+7. **Real time** — `CoopNative.GetRealTime` (`appSeconds`) for timeouts while the game is paused (`Level.TimeSeconds` stops).
 
-Про реверс: бинарники не дизассемблировались. Использовались только экспортированные символы DLL, vtable-патчинг
-(как в Mod) и смещения свойств через рефлексию UnrealScript (`FindField`), потому что раскладка части C++-заголовков
-репозитория (например, `UGameEngine`) не совпадает с реальным Engine.dll: запись в `GameEngine->ServerPackages` по
-заголовку портила память (первый вариант падал). Поля `AActor` (`bStatic`, `bNoDelete`) проверяются на эталонных
-классах при старте; при несовпадении исправление 3 отключается с предупреждением в логе.
+About reverse engineering: the binaries were not disassembled. Only the exported symbols of the DLLs, vtable patching (as in
+Mod) and property offsets through UnrealScript reflection (`FindField`) were used, because the layout of some C++ headers of
+the repository (e.g. `UGameEngine`) doesn't match the real Engine.dll: writing to `GameEngine->ServerPackages` through the
+header corrupted memory (the first version crashed). The `AActor` fields (`bStatic`, `bNoDelete`) are checked against known
+classes at startup; if they don't match, fix 3 is turned off with a warning in the log.
 
-## Ошибки, найденные и исправленные по ходу
+## Bugs found and fixed along the way
 
-Версии до 0.4 назывались 1.0–1.3 (релиз 1.3 переименован в 0.3).
+Versions before 0.4 were called 1.0–1.3 (release 1.3 was renamed to 0.3).
 
-| Симптом | Причина | Исправление |
+| Symptom | Cause | Fix |
 |---|---|---|
-| CT.exe падал при старте в `UClass::Serialize` | в `SWRCFix.uc` добавлены поля, а C++-заголовок `ModClasses.h` не обновлён | заголовок обновлён (UCC теперь сам перегенерирует его при `make`) |
-| Падения без лога и стека | VS 2026 по умолчанию `/EHsc`: `catch(...)` не ловит access violation, обработчик UE2 не срабатывает | `/EHa` во всех проектах — теперь при падении окно ошибки, `History:` и полный лог |
-| Хост падал в `PlayerCommando.TravelPostAccept` при переходе | `Squad.SetStance(None)`, если в прошлом уровне не было отряда | безопасная версия функции в `CoopFixes` |
-| Клиент падал в `ClientTravel` (экспорт вещей) | клиент без пешки при переходе с `bItems` | клиенты всегда переходят без вещей (`CoopGame.ProcessServerTravel`), снаряжение выдаётся заново |
-| Клиент появлялся «в воздухе» (GEO_01C) | спавн рядом с хостом во время скриптовой высадки | ждём, пока хост стоит на земле (до 30 с), плюс подтягивание к хосту после 15 с на расстоянии > 4000 |
-| Клиент умирал сразу вместо «ранения» | у SP-игрока `bCannotDie` | `bCannotDie=True` у `CoopCommando` |
-| Настройки ModCoop (последние адреса) не сохранялись между запусками | RC читает ini модов из `System`, а `SaveConfig` пишет в `GameData\Save`; динамические массивы записываются закомментированными | `RecentAddresses[5]` — статический массив; `CoopNative.LoadSavedConfig` при старте перечитывает умолчания из `Save\ModCoop.ini`; дубли `CoopLevels+=` убираются в меню хоста |
-| Первый живой тест по ZeroTier: «не подключается, логов нет» | На ПК нет правила брандмауэра для нового `CT.exe` (входящие UDP блокируются, сети ZeroTier и Ethernet — «Общедоступные»); клиент в логе: ни одного ответа хоста за 43 с. Логи были в `CT.log`, а не в `CoopHost/CoopClient.log`. Пустая клетчатая комната на скриншоте — карта Entry, на которой клиент ждёт подключения | `Разрешить в брандмауэре.bat` (пользователь запускает сам, правило для `CT.exe`, UDP, все профили); батники пишут `CoopHost.log`/`CoopClient.log` построчно; `Подключиться.bat` открывает `CoopJoinMenu` со статусом подключения и подсказкой «NO ANSWER FROM THE HOST» через 18 с |
-| Второй живой тест: сеть есть (ping, `Login request` на хосте), но клиент отключается сразу после `Welcomed by server` в обе стороны | разные сборки мода на двух ПК (GUID пакетов `ModCoop.u`/`Mod.u` меняется при каждой компиляции), движок обрывает загрузку молча | версия мода `CoopConfig.MOD_VERSION` (1.1) в логе и заголовках меню; клиент передаёт `?CoopVersion=`, хост пишет её в лог и отказывает с понятной причиной, если версия другая (без опции — не проверяется). Проверено: опция сохраняется при смене уровней |
-| У друга после копирования игры не запускается даже ванильный exe | сборки VS 2026 с `/MD` требуют VC++ Redistributable x86 (`vcruntime140`, `api-ms-win-crt-*`); CT.exe сохраняет `RenderDevice=Mod.ModRenderDevice` в `Save\System.ini`, поэтому и ванильный exe грузит `Mod.dll` | все проекты на статическую CRT (`/MT`; `new`/`delete` движка и так идут через `appMalloc`), зависимостей от VC++ Redistributable нет (проверено `dumpbin /dependents`); версия 1.2 |
-| (живой тест, 1.2) Поднятый клиент не может двигаться; камера клиента «ломается» (вероятно, то же — GEO_03C) | `Pawn.Reviving` вызывает `Controller.PawnRevived` → `EnterStartState` только на сервере; контроллер клиента оставался в `CtrlIncapacitated` (движение выключено, камера на кости `DeathCamera`) | `CoopPlayer.PawnRevived` вызывает на клиенте `ClientCoopPawnRevived` (проверено: состояние клиента после подъёма — `PlayerWalking`) |
-| (живой тест, 1.2) Клиент поднимает хоста — анимация сбрасывается | `TargetType`/`Target` вычисляются только на машине игрока; на сервере у клиента `TGT_Default`, и `BactaHealer.Idle.BeginState` на сервере принудительно переключал оружие | клиент отправляет цель на сервер при её смене (`ServerCoopSetTarget`) |
-| (живой тест, 1.2) Лежат хост и отряд, клиент жив — перезапуск уровня | SP-код каждый кадр вызывает `BleedOut` у раненого хоста, когда помочь некому | перехват `Pawn.BleedOut`: пока жив хоть один клиент, хост ждёт подъёма до `HostReviveWaitTime` (60 с); скриптовый `ACTION_FailMission` (хост не ранен) не задерживается. Проверено тестом `?CoopTest=hostdown` |
-| (живой тест, 1.2) Визор/фонарь у клиента не работает | `PlayerCommando` создаёт `CloneHeadlamp` в `PostBeginPlay` (только сервер), `GotoVisionMode` на клиенте выходил при `Flashlight == None` | `CoopCommando.PostNetBeginPlay` создаёт фонарь на клиенте |
-| Клиенты играют за бойцов Дельты (прототип) | Запрос: клиенты вместо ботов отряда | `CoopGame.CheckSquadTakeover`: когда боец вступает в отряд хоста (GEO_01A: Скорч после своего сценария и триггера `Add62ToSquad`) и сценарий его отпустил (не `Scripting`), первый клиент без бойца в 5 м от него забирает его: AI удаляется, старая пешка клиента тоже, камера за 1,5 с перелетает к бойцу (`ClientCoopTakeoverCamera`), боец получает снаряжение игрока. Привязка «IP/ник → класс бойца» хранится в `CoopGame.SquadAssignments` (ModCoop.ini). На следующих уровнях клиент сразу появляется своим бойцом без перелёта; если боец ещё занят сценарием — до 30 с смотрит его глазами. Хост не может отдать приказ на метку, специалиста которой играет клиент (подрыв — 62, взлом — 40, снайпер — 07), клиент делает это сам. Тест `CoopTest=pickup?CoopTestNext=GEO_01B` с двумя клиентами |
-| Враги у клиента всё ещё дёргались | Запрос `SetNetSpeed(40000)` на клиенте молча урезался до `MaxClientRate` его собственного драйвера (10000 из System.ini), в логе было «Net speed 5000» → фактически 10000 | Клиент перед запросом поднимает лимит своего драйвера (`SetNetRates`, только в памяти). В логе клиента теперь «Net speed is now 40000» |
-| У клиента после жестов (панели, заряд, детонатор) не возвращалось оружие, руки играли не те анимации без предмета в руке | `HandSignal.MarkerHandSetup` (выбор анимаций и предмета) и `Idle.Tick` (возврат оружия) работают только на сервере; анимация доставания рук на клиенте не запускалась, руки зависали в `Active` | `CoopPlayer.SetupClientHandSignal` выбирает анимации и предмет на клиенте так же; `FixHandSignalWeapon` запускает анимацию, если она не идёт, и возвращает оружие. Подрыв заряда клиента — через 1 с, после анимации детонатора (`CoopGame.CheckDetonations`) |
-| Ночное зрение у клиента-бойца не работало | Визоры используют налобный фонарь, у бойца Дельты на клиенте его нет | `CoopPlayer.EnsureHeadlamp` создаёт его на клиенте |
-| Не было таймера/прогресса установки заряда и взлома у клиента | `FractionComplete`, `DurationRemaining`, `ElapseSetupTime` только на сервере | `ClientCoopSetPanelProgress` каждые 0,2 с, пока панель активируется или отсчитывает |
-| Невидимые стены у клиента на месте разрушенных объектов | Разрушенный `Prop` выключает коллизию и меняет меш на сервере; реплицированные флаги не обновляют коллизию клиента | `CoopGame.SyncMapActorCollision` шлёт изменения, клиент применяет `SetCollision`/`SetStaticMesh` |
-| Камера Фиксера смотрела в стену, после подхвата боец приседал | Глаза бойца в сценке направлены в стену; сценарий ранит Фиксера и оставляет присед | Сценка — камера от третьего лица; при подхвате `ShouldCrouch(false)` и полное здоровье |
-| Привязки бойцов и последние адреса терялись после перезапуска | RC комментирует в ini элементы статических массивов, загруженные из файла | Списки хранятся одной строкой (`CoopConfig.SquadAssignmentList`, `RecentAddressList`) |
-| Интерфейс клиента виден во время сценки бойца | `CoopWatching` показывает чужие глаза, но HUD и визор свои | `SetCoopHUDHidden`: на время просмотра скрыты `myHUD` и `Helmet` (прежние значения восстанавливаются) |
-| Сцены вступления в отряд (GEO_01B: Фиксер за дверью, которую взрывает Скорч) | Боец вступает в отряд внутри сценария (`ACTION_ChangeSquadMember`), после этого сценарий ждёт события, которое у человека-бойца выполняет сам клиент (Фиксер ждёт взлома щита) | `CoopGame.CheckSceneWatch`: пока играет сценка между последним ожиданием и добавлением бойца, клиент, который будет его играть (прежний, иначе ближайший свободный), смотрит его глазами с заблокированным управлением (`CoopPlayer.CoopWatching`). Боец свободен, когда он в отряде, а сценарий только ждёт события (`IsScriptBusy`); тогда подхват, старая модель исчезает |
-| Клиент-Скорч не мог взорвать дверь | Хост не может отдать приказ, если специалиста играет клиент. Клиенту не хватало: смены типа заряда на детонатор (`AIT_Plunger`) и `User`/`bPlayerActivated` на клиентской копии; подрыва — `HandSignal.FireWeapon` вызывается анимацией от первого лица, которая есть только у клиента | `ClientCoopSetPanelState` передаёт тип, флаг и пешку пользователя; `ServerCoopStartHandSignal` при `TGT_DemolitionReady` сам переводит заряд клиента в `Explode`. Тест `CoopTest=door` (GEO_01B, Client1 — Скорч, Client2 получает Фиксера) |
-| Подсказки обучения ставили на паузу всех | `CTPauseHintText` показывается хосту | В сети `CoopPlayer.ShowMenu` не открывает подсказки |
-| Второй клиент с тем же CD-ключом после смены уровня отключался («CD key in use») | Хост проверяет ключи заново, когда все переподключаются одновременно; серверы GameSpy давно не работают | Ключи освобождаются и в `PreLogin`; клиент в коопе игнорирует `ClientSetBadCDKey`. Если хост всё же разорвёт соединение, клиент переподключается сам |
-| Вылет клиента на GEO_01C: `Assertion failed` в `CTPlayer.UsingItem.PlayerTick` | С 0.4 сервер повторяет состояние `UsingItem` клиента. Клиент отпустил «Использовать» и вышел из состояния, а коррекция позиции сервера (ещё в `UsingItem`) вернула его обратно с `bUse=False`, что ловит `assert(bUse)` | `CoopPlayer.UsingItem`: без зажатой кнопки сразу выход в `PlayerWalking` (до кода оригинала), и `BeginState` в этом случае не шлёт серверу начало использования |
-| Клиент не может пользоваться панелями (бакта-станции, взлом) | 1) `ActivateItem.HasRequiredInventory` не `simulated`: на клиенте, где панель — прокси, не выполнялась и давала false, нативный выбор цели отбрасывал панель. 2) Клиент удаляет свои копии панелей и получает их по сети без связей, которые создаются при старте карты (метка панели и её `Anchor`, `NavPts`, список бакта-станций). 3) Сценарии включают и выключают панели только на сервере. 4) `CTPlayer.Use`/`StartHandSignal` меняли панель и запоминали цель только у клиента, а `HandSignal` и панель работают на сервере | Хук `HasRequiredInventory` (тот же код, `simulated`); `ClientCoopSetPanelLinks` и `ClientCoopSetPanelState` (флаги usable/activating/activated, изменения сразу, всё раз в 3 с); `ServerCoopUsePanel` и `ServerCoopStartHandSignal`. Тест `CoopTest=panel` (`CoopTestPanel=<тип>`, `CoopTestForce=Locked/Unplaced`): бакта 40→200 здоровья, взлом двери GEO_01C идёт до 87% и дальше |
-| У клиентов объекты карты другой формы (огневая точка на GEO_01A) | `DrawScale3D`, `PrePivot` и `Skins` не реплицируются: клиент создаёт объект по умолчаниям класса (Bunker2 у сервера в масштабе 2.0, у клиента 1.0) | `CoopGame.SendMapActorDisplay` раз в секунду, 10 проходов, отправляет их клиенту (`ClientCoopSetActorDisplay`, масштаб тремя float, потому что векторы при репликации округляются до целых) |
-| NPC у клиентов двигаются рывками | Сетевые настройки мультиплеера: 10000 байт/с на клиента и 20 обновлений в секунду на сервере, а у клиента по умолчанию для интернета `ConfiguredInternetSpeed=5000` (в логе было «Net speed 5000») и `bDynamicNetSpeed` ещё её снижает | Натив `SetNetRates`: на хосте `MaxClientRate=40000`, `NetServerMaxTickRate=35` (`CoopConfig.NetClientRate/NetTickRate`, только в памяти). Клиент при входе отключает `bDynamicNetSpeed` и просит 40000 |
-| У клиентов NPC двигаются в одной и той же позе | Стойку пешки (`CurrentIdleState`: спокойная, боевая, берсерк, у турели…) выставляет AI на сервере, она не реплицируется, а от неё зависят анимации ожидания, ходьбы и бега. У клиента все NPC оставались в стойке по умолчанию | `CoopGame.SyncIdleStates` (каждые 0,2 с изменения, раз в 3 с всё) → `CoopPlayer.ClientCoopSetIdleState`. Проверено логом: отряд на сервере «спокойный», у клиента был «боевой», после синхронизации совпадает |
-| У клиентов объекты карты (огневые точки, стены бункеров) появляются поздно или не появляются | Динамические static mesh карты реплицируются, клиент удаляет свои копии. Сервер отправляет актёра, только пока считает его видимым (луч до центра), а центр больших мешей часто внутри другой геометрии | `CoopGame.MakeMapActorsRelevant` при загрузке уровня ставит таким актёрам `bAlwaysRelevant` (на GEO_01A 32, на GEO_01B 72 актёра) |
-| Вылеты клиента на GEO_03D (`General protection fault` в `CoopPlayer.PlayerTick`) | `Gunship.PostBeginPlay` помечен `simulated` и создаёт турели корабля и на клиенте. Эти локальные копии получают свой AI-контроллер, отстают от корабля, падают из мира и «умирают» на клиенте без `GameInfo`, после чего выбор цели игроком падает | Хук `Gunship.PostBeginPlay` в `CoopExtension`: на клиенте локальные турели и их контроллеры сразу удаляются, турели сервера приходят по сети |
-| Клиент не мог поднять хоста и вообще лечить бактой | 1) Нативная репликация Pawn не отправляет клиентам `bIncapacitated`: для клиента никто не был ранен. 2) Клиент переходит в состояние `UsingItem`, а сервер оставлял его в `PlayerWalking` и при сверке позиции (`ClientAdjustPosition` передаёт состояние сервера) сразу выкидывал обратно | `CoopGame.SyncIncapacitated` раз в секунду рассылает клиентам, кто ранен (`ClientCoopSetIncapacitated`). `CoopPlayer.UsingItem` сообщает серверу о начале и конце использования (`ServerCoopUsingItem`), сервер повторяет состояние. Проверено тестом `CoopTest=clientrevive` с настоящим нажатием F в окне клиента |
-| После поднятия у клиента нет оружия, пока не подберёт патроны | Оружие оставалось в `DownWeapon`: игра хочет «сменить» оружие на то же самое, а `Pawn.ChangedWeapon` в этом случае ничего не делает (код закомментирован в оригинале) | `CoopPlayer.FixStuckWeapon`: если оружие опущено и анимация закончилась больше 1,5 с назад, клиент достаёт его сам, сервер получает `ServerChangedWeapon` |
-| После смерти клиента белый экран | `Dead.BeginState` одиночной игры затемняет экран в белое (fade, bloom, blur); в одиночке это сбрасывает загрузка сохранения | Для клиентов `Dead.BeginState` повторяет оригинал без эффектов; до возрождения камера показывает другого игрока от третьего лица |
-| У клиентов хост серый и «мыльный» | У одиночного коммандос нет своего скина: используется материал меша по умолчанию, его в одиночке никто не видел | Клиенты назначают модели хоста белый MP-скин `CloneCommandoWhite_Shader` |
-| Другие игроки в прыжке замирали в стойке и так падали на землю | `Pawn.PlayJump` пустой, а родная анимация одиночного коммандос в воздухе держит позу стояния (в одиночной игре себя со стороны не видно) | Хуки `PlayJump`/`PlayFalling` в `CoopExtension`: для чужих коммандос (на хосте и у клиентов) играются `Jump` и `FallBreathe`, они в модели есть. Проверено тестами `CoopTest=jump` и `hostjump` с покадровой съёмкой. Вошло в 0.4 (до этого — обновлённый архив релиза 0.3) |
-| Батники неудобны: игроку нужно знать, какой запускать | Всё, что делали батники, уже есть в меню (`CO-OP: HOST/JOIN`) | bat-файлы удалены. `ModCoop.dll` при первом запуске `CT.exe` один раз создаёт ярлык на рабочем столе (`-forcelogflush`) и один раз спрашивает про правило брандмауэра (`MessageBox` → `netsh` через UAC, только с согласия игрока; маркеры `Save\ModCoopShortcut.done` / `ModCoopFirewall.done`, пропуск — `-CoopNoSetup`). `ModCoop.u` не пересобирался, версия осталась 1.3 |
-| Второй и третий клиент теряли своего бойца на следующем уровне | `StaticSaveConfig` в RC возвращает изменённую строку к значению, сохранённому первым; кроме того, значения, прочитанные из `Save\ModCoop.ini`, при записи комментируются (`;  `) и после перезапуска теряются | Списки (последние адреса, бойцы клиентов) пишутся нативно в секцию `[ModCoop.Lists]` (`CoopNative.Read/WriteSavedString`), прочитанные значения конфига помечаются изменёнными (`LoadSavedConfig`) |
-| Вылет хоста `AController::Tick` (тот, что был на скриншотах; воспроизведён на GEO_04A сразу после захвата Скорча) | Нативный ИИ отряда (стек: `Commando07Bot`) обращается к каждому члену отряда как к боту, а бойцом уже управляет клиент | Бойцы клиентов выводятся из ИИ-отряда (`DetachClientMembers`, проверка каждую секунду — скрипты добавляют их обратно); перед сменой уровня возвращаются, чтобы перейти с отрядом. В стеке вылета теперь видно имя бота (`CoopCTBotTick`). Минус: у хоста на HUD нет иконок бойцов клиентов |
-| «Бот-снайпер не стреляет» на GEO_01C | Два условия сцены: игрок, стоящий у ящика снайпера, не пускает Сева на позицию (маркер висит в `Setup`); при слишком быстром выходе на позицию Сан Фак пропускает событие и не бежит к кораблю | Второе исправлено `CheckMissedEvents`; первое — свойство оригинала: позицию снайпера нужно освободить |
-| Турели канонерки на клиентах (GEO_03D) | см. выше | Проверено сканом 17 уровней (GEO/RAS/YYY): локальных пешек с контроллером на клиентах не осталось, только безвредный труп клона без контроллера на GEO_01A |
-| Третий клиент вылетал через 3 с после входа (BADCDKEY) | `MasterServerUplink` проверяет CD-ключи клиентов, одинаковый ключ (один ПК или один ключ GOG) — «in use» | хост удаляет `MasterServerUplink`: кооп подключается по адресу, реклама сервера в GameSpy не нужна |
-| Меню переподключения делало одну попытку | неудачный `open` из меню не открывает `MenuConnectionFailed` | меню само ждёт таймаут и повторяет (до 12 раз) |
+| CT.exe crashed at startup in `UClass::Serialize` | fields were added to `SWRCFix.uc`, but the C++ header `ModClasses.h` wasn't updated | the header was updated (UCC now regenerates it during `make`) |
+| Crashes without a log or call stack | VS 2026 uses `/EHsc` by default: `catch(...)` doesn't catch access violations and the UE2 handler doesn't run | `/EHa` in all projects — a crash now shows the error dialog, `History:` and the full log |
+| The host crashed in `PlayerCommando.TravelPostAccept` on a level change | `Squad.SetStance(None)` if the previous level had no squad | a safe version of the function in `CoopFixes` |
+| The client crashed in `ClientTravel` (exporting items) | a client without a pawn on a level change with `bItems` | clients always travel without items (`CoopGame.ProcessServerTravel`), the equipment is given again |
+| The client spawned "in mid air" (GEO_01C) | spawned next to the host during a scripted landing | wait until the host stands on the ground (up to 30 s), plus moving to the host after 15 s at a distance > 4000 |
+| The client died at once instead of being wounded | the single player player has `bCannotDie` | `bCannotDie=True` on `CoopCommando` |
+| The ModCoop settings (recent addresses) weren't kept between starts | RC reads mod ini files from `System`, but `SaveConfig` writes to `GameData\Save`; dynamic arrays are written commented out | `RecentAddresses[5]` is a static array; `CoopNative.LoadSavedConfig` reads the defaults from `Save\ModCoop.ini` at startup; duplicate `CoopLevels+=` lines are removed in the host menu |
+| First live test over ZeroTier: "doesn't connect, no logs" | No firewall rule for the new `CT.exe` on the PC (incoming UDP blocked, the ZeroTier and Ethernet networks are "Public"); the client's log: not a single answer from the host in 43 s. The logs were in `CT.log`, not in `CoopHost/CoopClient.log`. The empty checkered room on the screenshot is the Entry map where the client waits for the connection | a batch file that allows CT.exe in the firewall (the user runs it, rule for `CT.exe`, UDP, all profiles); the batch files write `CoopHost.log`/`CoopClient.log` line by line; the connect batch file opens `CoopJoinMenu` with the connection status and the hint "NO ANSWER FROM THE HOST" after 18 s |
+| Second live test: the network works (ping, `Login request` on the host), but the client disconnects right after `Welcomed by server` both ways | different builds of the mod on the two PCs (the GUIDs of the packages `ModCoop.u`/`Mod.u` change with every compile), the engine silently stops loading | the mod version `CoopConfig.MOD_VERSION` (1.1) in the log and the menu titles; the client sends `?CoopVersion=`, the host logs it and refuses with a clear reason if the version differs (not checked without the option). Tested: the option is kept across level changes |
+| After copying the game, even the original exe didn't start on a friend's PC | VS 2026 builds with `/MD` need the VC++ Redistributable x86 (`vcruntime140`, `api-ms-win-crt-*`); CT.exe saves `RenderDevice=Mod.ModRenderDevice` in `Save\System.ini`, so the original exe loads `Mod.dll` too | all projects use the static CRT (`/MT`; the engine's `new`/`delete` go through `appMalloc` anyway), no dependency on the VC++ Redistributable (checked with `dumpbin /dependents`); version 1.2 |
+| (live test, 1.2) A revived client can't move; the client's camera "breaks" (probably the same on GEO_03C) | `Pawn.Reviving` calls `Controller.PawnRevived` → `EnterStartState` on the server only; the client's controller stayed in `CtrlIncapacitated` (movement off, camera on the `DeathCamera` bone) | `CoopPlayer.PawnRevived` calls `ClientCoopPawnRevived` on the client (tested: the client's state after the revive is `PlayerWalking`) |
+| (live test, 1.2) A client revives the host — the animation resets | `TargetType`/`Target` are computed only on the player's machine; on the server the client has `TGT_Default`, and `BactaHealer.Idle.BeginState` on the server forced a weapon switch | the client sends its target to the server when it changes (`ServerCoopSetTarget`) |
+| (live test, 1.2) The host and the squad are down, a client is up — the level restarts | the single player code calls `BleedOut` on the wounded host every frame when nobody can help | hook of `Pawn.BleedOut`: while a client is alive, the host waits to be revived for up to `HostReviveWaitTime` (60 s); a scripted `ACTION_FailMission` (host not wounded) isn't delayed. Tested with `?CoopTest=hostdown` |
+| (live test, 1.2) The visor/headlamp doesn't work on the client | `PlayerCommando` creates `CloneHeadlamp` in `PostBeginPlay` (server only), `GotoVisionMode` on the client returned early with `Flashlight == None` | `CoopCommando.PostNetBeginPlay` creates the headlamp on the client |
+| Clients play the Delta squad members (prototype) | Request: clients instead of the squad bots | `CoopGame.CheckSquadTakeover`: when a squad member joins the host's squad (GEO_01A: Scorch after his script and the trigger `Add62ToSquad`) and the script has let it go (not `Scripting`), the first client without a squad member within 5 m takes it over: the AI is removed, so is the client's old pawn, the camera flies to the member within 1.5 s (`ClientCoopTakeoverCamera`), the member gets the player's equipment. The assignment "IP/name → member class" is saved in `ModCoop.ini`. On the following levels the client starts as the member without the flight; if the member is still busy with a script, the client watches through its eyes for up to 30 s. The host can't order a marker whose specialist is played by a client (demolition — 62, hacking — 40, sniping — 07), the client does it themselves. Test `CoopTest=pickup?CoopTestNext=GEO_01B` with two clients |
+| Enemies still moved jerkily on the client | The request `SetNetSpeed(40000)` on the client was silently cut to `MaxClientRate` of its own driver (10000 from System.ini), the log showed "Net speed 5000" → effectively 10000 | Before the request the client raises the limit of its driver (`SetNetRates`, in memory only). The client's log now shows "Net speed is now 40000" |
+| After hand signals (panels, charge, detonator) the client didn't get the weapon back, the hands played the wrong animations without the item in the hand | `HandSignal.MarkerHandSetup` (choice of animations and item) and `Idle.Tick` (weapon back) only run on the server; the animation that raises the hands didn't start on the client, the hands stayed in `Active` | `CoopPlayer.SetupClientHandSignal` chooses the animations and the item on the client in the same way; `FixHandSignalWeapon` starts the animation if it isn't running and gives the weapon back. A client's charge is detonated after 1 s, after the detonator animation (`CoopGame.CheckDetonations`) |
+| Night vision didn't work for a client playing a squad member | The visors use the headlamp, the Delta member on the client has none | `CoopPlayer.EnsureHeadlamp` creates it on the client |
+| The client had no timer/progress for placing a charge and hacking | `FractionComplete`, `DurationRemaining`, `ElapseSetupTime` only exist on the server | `ClientCoopSetPanelProgress` every 0.2 s while the panel is being activated or counting down |
+| Invisible walls on the client where objects were destroyed | A destroyed `Prop` turns off its collision and changes its mesh on the server; the replicated flags don't update the client's collision | `CoopGame.SyncMapActorCollision` sends the changes, the client applies `SetCollision`/`SetStaticMesh` |
+| Fixer's camera looked at a wall, after the takeover the member crouched | The member's eyes point at a wall in the scene; the script wounds Fixer and leaves him crouching | The scene was shown from the third person (replaced in 0.57 by a smoothed first person view); on takeover `ShouldCrouch(false)` and full health |
+| The client's HUD was visible during a squad member's scene | `CoopWatching` shows someone else's eyes, but the client's own HUD and visor | `SetCoopHUDHidden`: `myHUD` and `Helmet` are hidden while watching (the previous values are restored) |
+| Scenes in which a member joins the squad (GEO_01B: Fixer behind the door Scorch blows up) | The member joins the squad inside its script (`ACTION_ChangeSquadMember`), after that the script waits for an event that the client playing the member triggers themselves (Fixer waits for the shield to be hacked) | `CoopGame.CheckSceneWatch`: while the scene between the last wait and the joining plays, the client that will play the member (the one from before, otherwise the closest free one) watches through its eyes with locked controls (`CoopPlayer.CoopWatching`). The member is free once it's in the squad and the script only waits for an event (`IsScriptBusy`); then the takeover happens and the old model disappears |
+| The client playing Scorch couldn't blow the door | The host can't give the order if a client plays the specialist. The client's copy lacked the change of the charge type to the detonator (`AIT_Plunger`) and `User`/`bPlayerActivated`; the detonation — `HandSignal.FireWeapon` is called by a first person animation that only exists on the client | `ClientCoopSetPanelState` sends the type, the flag and the user's pawn; `ServerCoopStartHandSignal` with `TGT_DemolitionReady` puts the client's charge into `Explode` itself. Test `CoopTest=door` (GEO_01B, Client1 — Scorch, Client2 gets Fixer) |
+| Tutorial hints paused everybody | `CTPauseHintText` is shown to the host | In network games `CoopPlayer.ShowMenu` doesn't open the hints |
+| A second client with the same CD key was disconnected after a level change ("CD key in use") | The host checks the keys again when everybody reconnects at the same time; the GameSpy servers have been down for a long time | The keys are released in `PreLogin` as well; in co-op the client ignores `ClientSetBadCDKey`. If the host still drops the connection, the client reconnects by itself |
+| Client crash on GEO_01C: `Assertion failed` in `CTPlayer.UsingItem.PlayerTick` | Since 0.4 the server mirrors the client's `UsingItem` state. The client released "Use" and left the state, but the server's position correction (still in `UsingItem`) put it back with `bUse=False`, which `assert(bUse)` catches | `CoopPlayer.UsingItem`: without the button held, go to `PlayerWalking` at once (before the original code), and `BeginState` doesn't tell the server about the start of the use in that case |
+| The client can't use panels (bacta dispensers, hacking) | 1) `ActivateItem.HasRequiredInventory` isn't `simulated`: on the client, where the panel is a proxy, it didn't run and returned false, so the native target selection dropped the panel. 2) The client deletes its copies of the panels and gets them over the network without the links created at map start (the panel's marker and its `Anchor`, `NavPts`, the list of bacta dispensers). 3) Scripts enable and disable panels only on the server. 4) `CTPlayer.Use`/`StartHandSignal` changed the panel and remembered the target only on the client, while `HandSignal` and the panel work on the server | Hook of `HasRequiredInventory` (same code, `simulated`); `ClientCoopSetPanelLinks` and `ClientCoopSetPanelState` (flags usable/activating/activated, changes at once, everything every 3 s); `ServerCoopUsePanel` and `ServerCoopStartHandSignal`. Test `CoopTest=panel` (`CoopTestPanel=<type>`, `CoopTestForce=Locked/Unplaced`): bacta 40→200 health, hacking the door on GEO_01C goes past 87% and on |
+| Map objects have a different shape on clients (the bunker on GEO_01A) | `DrawScale3D`, `PrePivot` and `Skins` aren't replicated: the client creates the object with the class defaults (Bunker2 is scaled 2.0 on the server, 1.0 on the client) | `CoopGame.SendMapActorDisplay` sends them to the client once per second, 10 times (`ClientCoopSetActorDisplay`, the scale as three floats because replicated vectors are rounded to integers) |
+| NPCs move jerkily on clients | The multiplayer network settings: 10000 bytes/s per client and 20 updates per second on the server, and the client's default internet speed `ConfiguredInternetSpeed=5000` (the log showed "Net speed 5000"), lowered further by `bDynamicNetSpeed` | Native `SetNetRates`: on the host `MaxClientRate=40000`, `NetServerMaxTickRate=35` (`CoopConfig.NetClientRate/NetTickRate`, in memory only). On joining, the client turns off `bDynamicNetSpeed` and asks for 40000 |
+| NPCs on clients move in the same pose all the time | The pawn's stance (`CurrentIdleState`: relaxed, alert, berserk, at a turret…) is set by the AI on the server and isn't replicated, but the idle, walk and run animations depend on it. On the client all NPCs kept the default stance | `CoopGame.SyncIdleStates` (changes every 0.2 s, everything every 3 s) → `CoopPlayer.ClientCoopSetIdleState`. Checked in the log: the squad is "relaxed" on the server, was "alert" on the client, matches after the sync |
+| Map objects (bunkers, bunker walls) appear late or not at all on clients | Dynamic static meshes of the map are replicated, the client deletes its own copies. The server sends an actor only while it considers it visible (a trace to its center), and the center of large meshes is often inside other geometry | `CoopGame.MakeMapActorsRelevant` sets `bAlwaysRelevant` on such actors when the level loads (32 actors on GEO_01A, 72 on GEO_01B) |
+| Client crashes on GEO_03D (`General protection fault` in `CoopPlayer.PlayerTick`) | `Gunship.PostBeginPlay` is `simulated` and creates the ship's turrets on the client too. These local copies get their own AI controller, are left behind by the ship, fall out of the world and "die" on the client without a `GameInfo`, after which the player's target selection crashed | Hook of `Gunship.PostBeginPlay` in `CoopExtension`: on the client the local turrets and their controllers are removed at once, the server's turrets come over the network. A scan of 17 levels (GEO/RAS/YYY) in 0.57: no local pawns with a controller are left on clients, only a harmless dead clone without a controller on GEO_01A |
+| The client couldn't revive the host and couldn't heal with bacta at all | 1) The native replication of Pawn doesn't send `bIncapacitated` to clients: for the client nobody was wounded. 2) The client goes to the `UsingItem` state, but the server kept it in `PlayerWalking` and threw it back right away during the position check (`ClientAdjustPosition` sends the server's state) | `CoopGame.SyncIncapacitated` tells the clients once per second who is wounded (`ClientCoopSetIncapacitated`). `CoopPlayer.UsingItem` tells the server about the start and the end of the use (`ServerCoopUsingItem`), the server mirrors the state. Tested with `CoopTest=clientrevive` with real key presses in the client's window |
+| After being revived the client has no weapon until it picks up ammo | The weapon stayed in `DownWeapon`: the game wants to "change" the weapon to the same one, and `Pawn.ChangedWeapon` does nothing in that case (the code is commented out in the original) | `CoopPlayer.FixStuckWeapon`: if the weapon is down and the animation ended more than 1.5 s ago, the client raises it itself and the server gets `ServerChangedWeapon` |
+| White screen after a client died | `Dead.BeginState` of single player fades the screen to white (fade, bloom, blur); in single player loading a save resets it | For clients `Dead.BeginState` does what the original does without the effects; until the respawn the camera shows another player from the third person |
+| The host looks gray and blurry to clients | The single player commando has no skin of its own: the default material of the mesh is used, which nobody ever saw in single player | Clients give the host's model the white multiplayer skin `CloneCommandoWhite_Shader` |
+| Other players froze standing in mid air when jumping and fell to the ground like that | `Pawn.PlayJump` is empty, and the native animation of the single player commando keeps the standing pose in the air (in single player you never see yourself from the outside) | Hooks of `PlayJump`/`PlayFalling` in `CoopExtension`: for other commandos (on the host and on clients) `Jump` and `FallBreathe` are played, the model has them. Tested with `CoopTest=jump` and `hostjump` with frame captures. Released in 0.4 (before that as an updated archive of release 0.3) |
+| Batch files were inconvenient: the player had to know which one to run | Everything the batch files did is already in the menu (`CO-OP: HOST/JOIN`) | The batch files were removed. On the first start of `CT.exe`, `ModCoop.dll` creates a desktop shortcut once (`-forcelogflush`) and asks once about the firewall rule (`MessageBox` → `netsh` through UAC, only with the player's consent; markers `Save\ModCoopShortcut.done` / `ModCoopFirewall.done`, skipped with `-CoopNoSetup`). `ModCoop.u` wasn't rebuilt, the version stayed 1.3 |
+| The second and third client lost their squad member on the next level | `StaticSaveConfig` in RC puts a changed string back to the value saved first; in addition, values read from `Save\ModCoop.ini` are written commented out (`;  `) and lost after a restart | The lists (recent addresses, squad members of the clients) are written natively to the section `[ModCoop.Lists]` (`CoopNative.Read/WriteSavedString`), values read from the config are marked as changed (`LoadSavedConfig`) |
+| Host crash in `AController::Tick` (the one on the screenshots; reproduced on GEO_04A right after Scorch was taken over) | The native squad AI (stack: `Commando07Bot`) treats every squad member as a bot, but a client already controls the member | Squad members of clients are taken out of the AI squad (`DetachClientMembers`, checked every second — scripts add them back); they rejoin before a level change so they travel with the squad. The crash history now shows the bot's name (`CoopCTBotTick`). Their HUD icons are drawn by `CoopHUD` since 0.58 |
+| "The AI sniper doesn't shoot" on GEO_01C | Two conditions of the scene: a player standing at the sniper crate keeps Sev from the position (the marker stays in `Setup`); when the position is reached too fast, Sun Fac misses the event and doesn't run to his ship | The second is fixed by `CheckMissedEvents`; the first is how the original works: the sniper position has to be free |
+| The third client was dropped 3 s after joining (BADCDKEY) | `MasterServerUplink` checks the CD keys of the clients; the same key (one PC or the same GOG key) is "in use" | The host removes `MasterServerUplink`: co-op connects by address, advertising the server on GameSpy isn't needed |
+| The squad icons were missing for squad members played by clients (host) and for everybody (clients) | The helmet draws the icons natively, only for AI members of the player's own squad; clients have no squad (it isn't replicated). Putting the client members into a squad just for drawing didn't help | `CoopHUD.DrawCoopSquad` draws them with the same texture (`CloneVisorIcons`) in the slots of the helmet |
+| Clients had no objective tracker, no current objective, no critical messages of scripts | See "Status (0.58)" | Forwarding of the script actions in `CoopExtension`, objectives synced by `CoopGame.SyncObjectives` |
+| Clients saw no explosion when a door was breached | Emitters aren't replicated | `CoopGame.ForwardEffect` for `ActivateItem`/`DroidDispenser` transitions and props |
+| The reconnect menu tried only once | a failed `open` from the menu doesn't open `MenuConnectionFailed` | the menu waits for the timeout itself and tries again (up to 12 times) |
 
-## Проверено (автотесты на одном ПК, хост + клиент 127.0.0.1)
+## Tested (automated tests on one PC, host + client 127.0.0.1)
 
-Окружение: Windows 11, Visual Studio 2026 (v145), GOG-версия игры, хост и клиент — два окна `CT.exe` на одном ПК.
+Environment: Windows 11, Visual Studio 2026 (v145), GOG version of the game, the host and the clients are separate `CT.exe`
+windows on one PC (up to 4).
 
-| Проверка | Результат |
+| Test | Result |
 |---|---|
-| Хост в кооп-режиме загружает каждый из 50 игровых уровней кампании (скан по всем `CoopLevels`, 28 с на уровень) | 50/50 без падений |
-| Прогон всей кампании с клиентом: хост сам переходит на следующий уровень каждые 50 с, клиент следует | все 50 уровней + EPILOGUE: клиент подключился на каждом, падений нет (после исправлений ниже) |
-| Синхронизация позиций (`bDebugLog`): сервер vs клиент | расхождение < 1 единицы (округление при репликации) |
-| Переход с отрядом (GEO_01B, GEO_01C): отряд 07/40/62 на месте, на HUD хоста | да |
-| Клиент «ранен» → хост поднимает его (`revive`, родной `TGT_FriendToHeal` + удержание «Использовать») | поднят через ~5 с |
-| Клиент погиб → возрождение рядом с хостом | через 5 с, здоровье 200 |
-| Хост «загружает чекпоинт» → перезапуск подуровня | все остаются в игре, клиент без переподключения |
-| Процесс хоста убит → хост запущен снова через 15–40 с | клиент: экран RECONNECTING, со 2-й попытки снова в игре |
-| Все 4 кооп-меню открываются (`?Menu=`) | без ошибок скриптов |
+| The host loads each of the 50 playable levels of the campaign in co-op mode (scan of all `CoopLevels`, 28 s per level) | 50/50 without crashes |
+| A run through the whole campaign with a client: the host moves on to the next level every 50 s, the client follows | all 50 levels + EPILOGUE: the client connected on every one, no crashes (after the fixes above) |
+| Position sync (`bDebugLog`): server vs client | difference < 1 unit (rounding during replication) |
+| Level change with the squad (GEO_01B, GEO_01C): squad 07/40/62 present, on the host's HUD | yes |
+| A client is wounded → the host revives them (`revive`, the original `TGT_FriendToHeal` + holding "Use") | revived after ~5 s |
+| A client died → respawn next to the host | after 5 s, health 200 |
+| The host "loads the checkpoint" → the part restarts | everybody stays in the game, the client doesn't reconnect |
+| The host process is killed → the host is started again after 15–40 s | client: RECONNECTING screen, back in the game on the 2nd attempt |
+| All 4 co-op menus open (`?Menu=`) | no script errors |
+| Host + 3 clients on GEO_01C from scratch, then the level change to GEO_03A (0.57) | every client gets their own squad member and keeps it on the next level |
+| Sniper scene GEO_01C with the AI sniper and with a client playing Sev, also with a "too fast" sniper (0.57) | mission success in all three cases |
+| Hacking by a client playing Fixer (GEO_01C), demolition by a client playing Scorch (GEO_01B) (0.57) | door unlocked, charge armed, no crashes |
+| Squad icons, objective tracker, objectives and effects on clients (0.58) | logged and captured on screenshots, not tested by hand |
 
-Падения, найденные прогоном и исправленные: см. таблицу выше (travel/`TravelPostAccept`, `ClientTravel` без пешки,
-`InitialClientActor`, брифинги, `UpdatePreNet` — устаревший кэш классов в исправлении 3, теперь только `Mover`/`StaticMeshActor`).
+Crashes found by the runs and fixed: see the table above (travel/`TravelPostAccept`, `ClientTravel` without a pawn,
+`InitialClientActor`, briefings, `UpdatePreNet` — an outdated class cache in fix 3, now only `Mover`/`StaticMeshActor`).
 
-**Чего автотест не покрывает:** каждый уровень проверялся ~1 минуту (загрузка, спавн, сеть, переход), а не полным
-прохождением. Скриптовые сцены в середине уровней (взрыв дверей, турели, оборона позиций, бои с боссами), стрельба
-по врагам и поведение отряда в бою с подключённым клиентом не проверены — нужен живой тест двумя игроками.
-Тестировались только 2 игрока.
+**What the automated tests don't cover:** most levels were checked for about a minute (loading, spawning, network, level
+change), not played through. Scripted scenes in the middle of levels (turrets, defending positions, boss fights), fighting
+enemies and the squad's behavior in combat with connected clients need a live test with several players.
 
-Инструменты (для разработчика, игроку не нужны):
-- `?CoopTest=<действие>?CoopTestDelay=<сек>` в URL хоста — автосценарии в `CoopGame.TickTest`:
-  `travel` (переход на следующий уровень, параметр сохраняется → прогон по всей кампании),
-  `restart`, `checkpoint`, `clientdeath`, `clientincap`, `revive` (хост поднимает клиента, эмулируя удержание «Использовать»).
-- `ModCoop.ini`: `[ModCoop.CoopConfig] bDebugLog=True` — раз в секунду позиции/здоровье игроков на сервере и клиентах,
-  а при старте уровня — список «статических» актёров, которые будут реплицироваться.
+Tools (for the developer, players don't need them):
+- `?CoopTest=<action>?CoopTestDelay=<s>` in the host's URL — automated scenarios in `CoopGame.TickTest`, e.g.
+  `travel` (next level; the option is kept → a run through the whole campaign), `restart`, `checkpoint`, `clientdeath`,
+  `clientincap`, `revive`, `panel`, `door`, `breach`, `scene`, `snipe`, `levelinfo`, `memberinfo`, `squadicons`.
+- `ModCoop.ini`: `[ModCoop.CoopConfig] bDebugLog=True` — positions/health of the players on the server and the clients once
+  per second, and at level start the list of "static" actors that will be replicated.
 
-## Известные ограничения и баги
+## Known limitations and bugs
 
-- **Нет сохранений в кооперативе.** Чекпоинт = начало текущего подуровня. Подуровни короткие (обычно 10–20 минут).
-- **Отряд командует только хост.** Клиенты не входят в отряд: боты их не лечат и не прикрывают, приказы клиентов игнорируются.
-  Причина: нативный код отряда (`CTSquadNative`) рассчитан на одного лидера-игрока. Безопасно добавить второго лидера
-  без реверса нельзя.
-- **Ролики и кат-сцены видит только хост.** Bink-видео (`ACTION_PlayMovie`) проигрывается локально у хоста, клиенты
-  в это время стоят на месте. Matinee-сцены двигают только пешку хоста; отставших клиентов подтягивает к хосту.
-- **Подсказки обучения** в кооперативе не показываются (с 0.5).
-- **Пауза** в сетевой игре не работает (отключена намеренно: иначе меню хоста замораживало бы всех).
-- **3–4 игрока** поддерживаются кодом (`MaxPlayers` до 4), но тестировались только 2 (одна машина). Приоритет — 2 игрока.
-- **Внешний вид меню** проверен только по логам (меню открываются без ошибок скриптов); снимки экрана меню получить
-  не удалось — экран тестовой машины был заблокирован. Тексты меню на английском: шрифты игры без кириллицы.
-- После выхода из кооп-сессии в том же запуске игры остаются уменьшенные таймауты соединения (15/30 с) — на обычный
-  мультиплеер это не влияет, кроме более быстрого отключения при обрыве.
-- **GEO_01A, взрыв стены (`Prop3` «BarricadeWall», `Arena_HR.ArenaWalls.BlowAwayWall`): у клиента пропадают текстуры** — не исправлено.
-  Стена — разрушаемый `Prop`; на клиенте это реплицированная копия без запечённого освещения (`StaticMeshInstance`), а смена
-  материала (`Skins[0]`) при разрушении не реплицируется. Какая из причин даёт эффект — нужен скриншот.
-- **Подрыв и взлом по меткам отряда** — приказы отряду, их отдаёт только хост (клиенты не лидеры отряда). Панели, которые игрок
-  использует сам (бакта-станции, взлом), у клиентов работают с 0.5. Если специалиста играет клиент, приказ хосту недоступен,
-  клиент делает это сам.
-- NPC у клиентов наклоняют корпус и голову к цели не так, как на сервере: прицеливание считает нативный код по данным AI, которого на клиенте нет.
+- **No saves in co-op.** A checkpoint is the start of the current part. The parts are short (usually 10–20 minutes).
+- **Only the host commands the squad.** Clients are not squad leaders: the AI doesn't heal or cover them, and the clients'
+  orders are ignored. Reason: the native squad code (`CTSquadNative`) is designed for one player leader. A second leader can't
+  be added safely without reverse engineering.
+- **Movies are only seen by the host.** Bink videos (`ACTION_PlayMovie`) play locally on the host while the clients stand
+  still. Matinee scenes only move the host's pawn; clients left behind are moved to the host.
+- **Pausing** doesn't work in network games (turned off on purpose: otherwise the host's menu would freeze everybody).
+- **Menu texts are in English:** the game's fonts have no Cyrillic letters.
+- After leaving a co-op session, the shortened connection timeouts (15/30 s) stay for the rest of that game session — this
+  doesn't affect normal multiplayer except for a faster disconnect when the connection drops.
+- **GEO_01A, the wall explosion (`Prop3` "BarricadeWall", `Arena_HR.ArenaWalls.BlowAwayWall`): the client loses the textures**
+  — not fixed. The wall is a destructible `Prop`; on the client it's a replicated copy without baked lighting
+  (`StaticMeshInstance`), and the change of material (`Skins[0]`) on destruction isn't replicated. A screenshot is needed to
+  tell which of the two causes it.
+- NPCs on clients don't lean their body and head towards the target like on the server: the aiming is computed by native code
+  from AI data that doesn't exist on clients.
+- On the host, squad members played by clients are not in the AI squad: the AI doesn't revive them, and markers that need
+  several AI members may not start (the door breach doesn't need them, see `CheckGather`).
 
-## Не вошло и почему
+## Left out and why
 
-- **Сохранение/загрузка в сети** — движок блокирует запись сохранения в сетевом режиме на уровне `UGameEngine::SaveGame`.
-  Обход требует реверса Engine.dll (нарушает условие «сначала высокоуровневые пути»). Заменено перезапуском подуровня.
-- **Приказы отряду от клиентов** — см. ограничения: нативный код отряда.
-- **Синхронный показ роликов клиентам** — можно добавить клиентскую функцию `PlayMovie` с синхронизацией конца ролика,
-  но это требует ожидания всех клиентов сервером; отложено ради стабильности.
-- **Брифинги (GEO_01Briefing, RAS_01Briefing, YYY_01Briefing, YYY07Briefing) исключены.** Клиент на них стабильно
-  завершается во время старта уровня (BeginPlay), без исключения и без записи в журнале Windows — стека нет, а поиск
-  причины требует отладки бинарника. Брифинги — кат-сцены без геймплея, поэтому `CoopGame.SkipBriefing` при любом переходе
-  на брифинг ведёт сразу на следующий уровень кампании (по `GameEngine.ProgressLevels`), а если сервер запущен на брифинге —
-  уходит с него в первую секунду. PRO (пролог) тоже не в списке меню хоста.
+- **Saving/loading in network games** — the engine blocks writing a save in network mode in `UGameEngine::SaveGame`.
+  A workaround needs reverse engineering of Engine.dll (against the rule "high level paths first"). Replaced by restarting
+  the current part.
+- **Squad orders from clients** — see the limitations: native squad code.
+- **Showing movies to clients in sync** — a client function `PlayMovie` with a sync of the movie's end could be added, but
+  the server would have to wait for all clients; postponed for stability.
+- **Briefings (GEO_01Briefing, RAS_01Briefing, YYY_01Briefing, YYY07Briefing) are excluded.** The client reliably exits
+  during the level start on them (BeginPlay), without an exception and without an entry in the Windows event log — there is no
+  call stack, and finding the cause needs debugging of the binary. Briefings are cutscenes without gameplay, so
+  `CoopGame.SkipBriefing` sends any level change to a briefing straight to the next level of the campaign (by
+  `GameEngine.ProgressLevels`), and if the server was started on a briefing, it leaves it within the first second. PRO
+  (the prologue) isn't in the host menu either.

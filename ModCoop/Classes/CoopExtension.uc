@@ -16,6 +16,18 @@ var FunctionOverride PlayJumpOverride;
 var FunctionOverride PlayFallingOverride;
 var FunctionOverride GunshipPostBeginPlayOverride;
 var FunctionOverride HasRequiredInventoryOverride;
+var FunctionOverride ObjectiveTrackerOverride;  // HUD changes of level scripts for the clients (see CoopGame.ForwardObjectiveTracker)
+var FunctionOverride BlinkSquadOverride;
+var FunctionOverride BlinkSquadCommandPromptOverride;
+var FunctionOverride BlinkGrenadeOverride;
+var FunctionOverride BlinkHealthOverride;
+var FunctionOverride BlinkShieldsOverride;
+var FunctionOverride ShakeViewOverride;
+var FunctionOverride ScreenFadeOverride;
+var FunctionOverride ObjectiveUpdateOverride;
+var FunctionOverride CriticalMessageOverride;
+var FunctionOverride ActivateItemTransitionOverride; // Effects for the clients (see CoopGame.ForwardEffect)
+var FunctionOverride DispenserTransitionOverride;
 
 function Init(SWRCFix Fix)
 {
@@ -46,6 +58,31 @@ function Init(SWRCFix Fix)
 
 	HasRequiredInventoryOverride = new class'FunctionOverride';
 	HasRequiredInventoryOverride.Init(class'ActivateItem', 'HasRequiredInventory', self, 'ActivateItemHasRequiredInventory');
+
+	ObjectiveTrackerOverride = new class'FunctionOverride';
+	ObjectiveTrackerOverride.Init(class'ACTION_ShowActorObjectiveTracker', 'InitActionFor', self, 'ObjectiveTrackerInitActionFor');
+	BlinkSquadOverride = new class'FunctionOverride';
+	BlinkSquadOverride.Init(class'ACTION_BlinkHUDSquad', 'InitActionFor', self, 'BlinkSquadInitActionFor');
+	BlinkSquadCommandPromptOverride = new class'FunctionOverride';
+	BlinkSquadCommandPromptOverride.Init(class'ACTION_BlinkHUDSquadCommandPrompt', 'InitActionFor', self, 'BlinkSquadCommandPromptInitActionFor');
+	BlinkGrenadeOverride = new class'FunctionOverride';
+	BlinkGrenadeOverride.Init(class'ACTION_BlinkHUDGrenade', 'InitActionFor', self, 'BlinkGrenadeInitActionFor');
+	BlinkHealthOverride = new class'FunctionOverride';
+	BlinkHealthOverride.Init(class'ACTION_BlinkHUDHealth', 'InitActionFor', self, 'BlinkHealthInitActionFor');
+	BlinkShieldsOverride = new class'FunctionOverride';
+	BlinkShieldsOverride.Init(class'ACTION_BlinkHUDShields', 'InitActionFor', self, 'BlinkShieldsInitActionFor');
+	ShakeViewOverride = new class'FunctionOverride';
+	ShakeViewOverride.Init(class'ACTION_ShakeView', 'InitActionFor', self, 'ShakeViewInitActionFor');
+	ScreenFadeOverride = new class'FunctionOverride';
+	ScreenFadeOverride.Init(class'ACTION_ScreenFade', 'InitActionFor', self, 'ScreenFadeInitActionFor');
+	ObjectiveUpdateOverride = new class'FunctionOverride';
+	ObjectiveUpdateOverride.Init(class'ACTION_ObjectiveUpdate', 'InitActionFor', self, 'ObjectiveUpdateInitActionFor');
+	CriticalMessageOverride = new class'FunctionOverride';
+	CriticalMessageOverride.Init(class'ACTION_DisplayCriticalMessage', 'InitActionFor', self, 'CriticalMessageInitActionFor');
+	ActivateItemTransitionOverride = new class'FunctionOverride';
+	ActivateItemTransitionOverride.Init(class'ActivateItem', 'MakeTransition', self, 'ActivateItemMakeTransition');
+	DispenserTransitionOverride = new class'FunctionOverride';
+	DispenserTransitionOverride.Init(class'DroidDispenser', 'MakeTransition', self, 'DispenserMakeTransition');
 }
 
 /*
@@ -193,3 +230,195 @@ simulated function DisconnectOnYes()
 	class'CoopConfig'.static.EndSession();
 	MenuDisconnect(DisconnectOnYesOverride.CurrentSelf).OnYes();
 }
+
+/*
+ * Level scripts change the HUD of the first player they find (the host): objective tracker, blinking HUD elements, view shakes and
+ * screen fades. Critical messages (objectives) only reach players with a HUD on the server. The original runs, then it is forwarded
+ * to the clients (CoopPlayer.ClientCoop...).
+ */
+function bool ObjectiveTrackerInitActionFor(ScriptedController C)
+{
+	local ACTION_ShowActorObjectiveTracker Action;
+	local Actor A, Found;
+	local bool bResult;
+
+	Action = ACTION_ShowActorObjectiveTracker(ObjectiveTrackerOverride.CurrentSelf);
+	bResult = Action.InitActionFor(C);
+
+	if(CoopGame(C.Level.Game) != None)
+	{
+		if(Action.ActorTag != 'None')
+		{
+			foreach C.AllActors(class'Actor', A, Action.ActorTag)
+			{
+				Found = A;
+				break;
+			}
+		}
+
+		CoopGame(C.Level.Game).ForwardObjectiveTracker(Found, Found != None);
+	}
+
+	return bResult;
+}
+
+function bool BlinkSquadInitActionFor(ScriptedController C)
+{
+	local ACTION_BlinkHUDSquad Action;
+	local bool bResult;
+
+	Action = ACTION_BlinkHUDSquad(BlinkSquadOverride.CurrentSelf);
+	bResult = Action.InitActionFor(C);
+
+	if(CoopGame(C.Level.Game) != None)
+		CoopGame(C.Level.Game).ForwardBlinkHUD(0, Action.BlinkTime);
+
+	return bResult;
+}
+
+function bool BlinkSquadCommandPromptInitActionFor(ScriptedController C)
+{
+	local ACTION_BlinkHUDSquadCommandPrompt Action;
+	local bool bResult;
+
+	Action = ACTION_BlinkHUDSquadCommandPrompt(BlinkSquadCommandPromptOverride.CurrentSelf);
+	bResult = Action.InitActionFor(C);
+
+	if(CoopGame(C.Level.Game) != None)
+		CoopGame(C.Level.Game).ForwardBlinkHUD(1, Action.BlinkTime);
+
+	return bResult;
+}
+
+function bool BlinkGrenadeInitActionFor(ScriptedController C)
+{
+	local ACTION_BlinkHUDGrenade Action;
+	local bool bResult;
+
+	Action = ACTION_BlinkHUDGrenade(BlinkGrenadeOverride.CurrentSelf);
+	bResult = Action.InitActionFor(C);
+
+	if(CoopGame(C.Level.Game) != None)
+		CoopGame(C.Level.Game).ForwardBlinkHUD(2, Action.BlinkTime);
+
+	return bResult;
+}
+
+function bool BlinkHealthInitActionFor(ScriptedController C)
+{
+	local ACTION_BlinkHUDHealth Action;
+	local bool bResult;
+
+	Action = ACTION_BlinkHUDHealth(BlinkHealthOverride.CurrentSelf);
+	bResult = Action.InitActionFor(C);
+
+	if(CoopGame(C.Level.Game) != None)
+		CoopGame(C.Level.Game).ForwardBlinkHUD(3, Action.BlinkTime);
+
+	return bResult;
+}
+
+function bool BlinkShieldsInitActionFor(ScriptedController C)
+{
+	local ACTION_BlinkHUDShields Action;
+	local bool bResult;
+
+	Action = ACTION_BlinkHUDShields(BlinkShieldsOverride.CurrentSelf);
+	bResult = Action.InitActionFor(C);
+
+	if(CoopGame(C.Level.Game) != None)
+		CoopGame(C.Level.Game).ForwardBlinkHUD(4, Action.BlinkTime);
+
+	return bResult;
+}
+
+function bool ShakeViewInitActionFor(ScriptedController C)
+{
+	local ACTION_ShakeView Action;
+	local bool bResult;
+
+	Action = ACTION_ShakeView(ShakeViewOverride.CurrentSelf);
+	bResult = Action.InitActionFor(C);
+
+	if(CoopGame(C.Level.Game) != None)
+		CoopGame(C.Level.Game).ForwardShakeView(Action.InTime, Action.SustainTime, Action.OutTime, Action.ShakeTranslationMag, Action.ShakeRotationMag, Action.Frequency);
+
+	return bResult;
+}
+
+function bool ScreenFadeInitActionFor(ScriptedController C)
+{
+	local ACTION_ScreenFade Action;
+	local bool bResult;
+
+	Action = ACTION_ScreenFade(ScreenFadeOverride.CurrentSelf);
+	bResult = Action.InitActionFor(C);
+
+	if(CoopGame(C.Level.Game) != None)
+		CoopGame(C.Level.Game).ForwardScreenFade(Action.FadeTime, Action.FadeColor);
+
+	return bResult;
+}
+
+/*
+ * Doors, panels and charges (ActivateItem) and droid dispensers spawn the effects of their state changes (e.g. a breached door
+ * exploding) on the server only, emitters aren't replicated.
+ */
+function ActivateItemMakeTransition(ActivateItem.ActivationInfo Info)
+{
+	local ActivateItem Item;
+
+	Item = ActivateItem(ActivateItemTransitionOverride.CurrentSelf);
+	Item.MakeTransition(Info);
+
+	if(Info.TransitionEffect != None && CoopGame(Item.Level.Game) != None)
+		CoopGame(Item.Level.Game).ForwardEffect(Info.TransitionEffect, Item.Location + Info.TransitionEffectOffset, Item.Rotation, None);
+}
+
+function DispenserMakeTransition(DroidDispenser.TransitionInfo Info)
+{
+	local DroidDispenser D;
+
+	D = DroidDispenser(DispenserTransitionOverride.CurrentSelf);
+	D.MakeTransition(Info);
+
+	if(Info.TransitionEffect != None && CoopGame(D.Level.Game) != None)
+		CoopGame(D.Level.Game).ForwardEffect(Info.TransitionEffect, D.Location + Info.TransitionEffectOffset, D.Rotation, D);
+}
+
+// Critical messages of scripts are shown by the HUDs on the server, remote clients have none there
+function bool ObjectiveUpdateInitActionFor(ScriptedController C)
+{
+	local ACTION_ObjectiveUpdate Action;
+	local MissionObjectives Obj;
+	local bool bResult;
+
+	Action = ACTION_ObjectiveUpdate(ObjectiveUpdateOverride.CurrentSelf);
+	bResult = Action.InitActionFor(C);
+
+	if(Action.DisplayText != "" && CoopGame(C.Level.Game) != None)
+	{
+		foreach C.AllActors(class'MissionObjectives', Obj)
+			break;
+
+		if(Obj != None)
+			CoopGame(C.Level.Game).ForwardCriticalMessage(Action.DisplayText, Obj.FadeTime, Obj.CritTextColor);
+	}
+
+	return bResult;
+}
+
+function bool CriticalMessageInitActionFor(ScriptedController C)
+{
+	local ACTION_DisplayCriticalMessage Action;
+	local bool bResult;
+
+	Action = ACTION_DisplayCriticalMessage(CriticalMessageOverride.CurrentSelf);
+	bResult = Action.InitActionFor(C);
+
+	if(CoopGame(C.Level.Game) != None)
+		CoopGame(C.Level.Game).ForwardCriticalMessage(Action.Message, Action.Duration, Action.Color);
+
+	return bResult;
+}
+

@@ -55,8 +55,10 @@ replication
 {
 	reliable if(Role == ROLE_Authority)
 		ClientCoopMessage, ClientCoopPawnRevived, ClientCoopSetIncapacitated, ClientCoopSetIdleState, ClientCoopSetPanelState, ClientCoopTakeoverCamera, ClientCoopSetActorCollision;
+	reliable if(Role == ROLE_Authority)
+		ClientCoopObjectiveTracker, ClientCoopBlinkHUD, ClientCoopShakeView, ClientCoopScreenFade, ClientCoopCriticalMessage, ClientCoopSetObjectives;
 	unreliable if(Role == ROLE_Authority)
-		ClientCoopSetActorDisplay, ClientCoopSetPanelLinks, ClientCoopSetPanelProgress;
+		ClientCoopSetPawnHealth, ClientCoopSpawnEffect, ClientCoopSetActorDisplay, ClientCoopSetPanelLinks, ClientCoopSetPanelProgress;
 	reliable if(Role < ROLE_Authority)
 		ServerTeleportToHost, ServerCoopSetTarget, ServerCoopUsingItem, ServerCoopUsePanel, ServerCoopStartHandSignal;
 }
@@ -920,6 +922,104 @@ simulated function RestoreWatchedPawn()
 
 	WatchHiddenActors.Length = 0;
 	WatchHiddenPawn = None;
+}
+
+// CTPlayer always spawns CTHUD
+function SpawnDefaultHUD()
+{
+	if(myHUD == None)
+		myHUD = Spawn(class'CoopHUD', self);
+
+	Super.SpawnDefaultHUD();
+}
+
+simulated function bool IsDeltaMember(Pawn P)
+{
+	return P.IsA('Commando07Delta') || P.IsA('Commando40Delta') || P.IsA('Commando62Delta');
+}
+
+// Health of other pawns isn't replicated, the squad icons show it (see CoopGame.SyncSquadHealth)
+simulated function ClientCoopSetPawnHealth(Pawn P, float NewHealth)
+{
+	if(P != None && P.Role < ROLE_Authority)
+		P.Health = NewHealth;
+}
+
+// Emitters are not replicated: effects of doors, panels, droid dispensers and props the server spawned (see CoopGame.ForwardEffect)
+simulated function ClientCoopSpawnEffect(class<Emitter> EffectClass, vector EffectLocation, rotator EffectRotation, Actor AttachTo)
+{
+	local Emitter E;
+
+	if(EffectClass == None)
+		return;
+
+	E = Spawn(EffectClass,,, EffectLocation, EffectRotation);
+
+	if(E != None && AttachTo != None)
+		E.SetBase(AttachTo);
+}
+
+/*
+ * Level scripts change the HUD of the first player only (ACTION_ShowActorObjectiveTracker, ACTION_BlinkHUD..., ACTION_ShakeView,
+ * ACTION_ScreenFade) or of the players with a HUD on the server (critical messages). The server forwards them (see CoopExtension).
+ */
+simulated function ClientCoopObjectiveTracker(Actor A, vector Location, bool bShow)
+{
+	if(Helmet == None)
+		return;
+
+	if(!bShow)
+		Helmet.HideObjectiveTracker();
+	else if(A != None)
+		Helmet.ShowActorObjectiveTracker(A);
+	else
+		Helmet.ShowPositionObjectiveTracker(Location);
+}
+
+simulated function ClientCoopBlinkHUD(byte Element, float BlinkTime)
+{
+	if(Helmet == None)
+		return;
+
+	switch(Element)
+	{
+	case 0: BlinkHUDSquad(BlinkTime); break;
+	case 1: BlinkHUDSquadCommandPrompt(BlinkTime); break;
+	case 2: BlinkHUDGrenade(BlinkTime); break;
+	case 3: BlinkHUDHealth(BlinkTime); break;
+	case 4: BlinkHUDShields(BlinkTime); break;
+	}
+}
+
+simulated function ClientCoopShakeView(float InTime, float SustainTime, float OutTime, vector TranslationMag, rotator RotationMag, float Frequency)
+{
+	ShakeView(InTime, SustainTime, OutTime, TranslationMag.X, TranslationMag.Y, TranslationMag.Z, RotationMag.Yaw, RotationMag.Pitch, Frequency);
+}
+
+simulated function ClientCoopScreenFade(float FadeTime, color FadeColor)
+{
+	StartScreenFade(FadeTime, FadeColor);
+}
+
+simulated function ClientCoopCriticalMessage(string Message, float Duration, color TextColor)
+{
+	if(myHUD != None)
+		myHUD.AddCriticalMessage(Message, Duration, TextColor);
+}
+
+// State of the mission objectives, one digit per objective (see CoopGame.SyncObjectives). The helmet shows the current one.
+simulated function ClientCoopSetObjectives(MissionObjectives O, string States, int Current)
+{
+	local int i;
+
+	if(O == None || O.Role == ROLE_Authority)
+		return;
+
+	for(i = 0; i < O.MissionObj.Length && i < Len(States); i = i + 1)
+		O.MissionObj[i].Stat = EObjectiveMode(int(Mid(States, i, 1)));
+
+	O.CurrentObjective = Current;
+	Objectives = O;
 }
 
 // See CoopGame.SyncPanelStates: progress of planting a charge, hacking etc. shown by the HUD

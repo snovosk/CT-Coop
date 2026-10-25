@@ -1,122 +1,146 @@
-# Republic Commando — кооперативная кампания (ModCoop)
+# Republic Commando — co-op campaign (ModCoop)
 
-Мод позволяет пройти кампанию Star Wars: Republic Commando вдвоём (до 4 игроков).
-Один игрок — **хост**: он играет сам и одновременно является сервером. Остальные подключаются к нему по IP.
-Хост играет за 38 (Босс) и командует отрядом, остальные игроки по ходу кампании занимают места бойцов Дельты (62 Скорч, 40 Фиксер, 07 Сев).
+[Русская версия](README.ru.md)
 
-> **Это тестовая сборка.** Мод в разработке, возможны ошибки и вылеты. Сцена со снайпером на GEO_01C (первый эпизод, Geonosis)
-> пройдена автотестами, руками кампания проверена примерно до неё. Дальше не тестировалось. Если что-то сломалось — сохраните
-> `GameData\System\CT.log` до следующего запуска игры и пришлите его вместе с описанием.
+This mod lets you play the Star Wars: Republic Commando campaign together with friends (up to 4 players).
+One player is the **host**: they play and run the server at the same time. The others connect to them by IP address.
+The host plays 38 (Boss) and commands the squad; as the campaign goes on, the other players take over the Delta squad members
+(62 Scorch, 40 Fixer, 07 Sev).
 
-## Установка
+The mod is built on [SWRC-Modding/CT](https://github.com/SWRC-Modding/CT), the community fixes for the game.
 
-1. Найдите папку игры, внутри неё — папку `GameData`
+> **This is a test build.** The mod is still in development, so expect bugs and crashes. The sniper scene on GEO_01C (first
+> episode, Geonosis) passes the automated tests; the campaign has been played by hand up to about that point. Nothing after it
+> has been tested yet. If something breaks, keep `GameData\System\CT.log` before you start the game again and send it with a
+> short description.
+
+## Installation
+
+1. Find the game folder and the `GameData` folder inside it
    (GOG: `C:\GOG Games\Star Wars - Republic Commando\GameData`,
    Steam: `...\steamapps\common\Star Wars Republic Commando\GameData`).
-2. Распакуйте архив мода **прямо в `GameData`** с заменой файлов. Должны появиться
-   `GameData\System\CT.exe`, `ModCoop.u`, `ModCoop.dll`, `Mod.u`, `Mod.dll`.
-3. Один раз запустите **`GameData\System\CT.exe`**. При первом запуске мод:
-   - создаст на рабочем столе ярлык **«Star Wars Republic Commando Co-op»** — дальше запускайте игру им;
-   - спросит, разрешить ли CT.exe в брандмауэре Windows. Ответьте «Да» и подтвердите запрос администратора:
-     без этого друзья не смогут подключиться к вам, когда вы хост (Windows молча блокирует подключения).
-   Оба шага выполняются один раз. Удалённый ярлык не появится снова.
-   Чтобы повторить шаги, удалите `GameData\Save\ModCoopShortcut.done` или `ModCoopFirewall.done`.
+2. Extract the mod archive **directly into `GameData`**, replacing the existing files. You should now have
+   `GameData\System\CT.exe`, `ModCoop.u`, `ModCoop.dll`, `Mod.u` and `Mod.dll`.
+3. Start **`GameData\System\CT.exe`** once. On the first start the mod:
+   - creates a **"Star Wars Republic Commando Co-op"** shortcut on the desktop — use it to start the game from now on;
+   - asks whether CT.exe may pass the Windows firewall. Answer "Yes" and confirm the administrator prompt:
+     without it your friends can't connect when you are the host (Windows silently blocks the connections).
+   Both steps happen only once. A deleted shortcut is not created again.
+   To repeat a step, delete `GameData\Save\ModCoopShortcut.done` or `ModCoopFirewall.done`.
 
-Обычный `SWRepublicCommando.exe` и старый ярлык игры продолжают работать как раньше, но без кооператива.
+The normal `SWRepublicCommando.exe` and the old game shortcut still work as before, just without co-op.
 
-**Мод нужен всем игрокам, и версия должна совпадать.** Самый простой способ — передать друзьям тот же архив.
+**Every player needs the mod, and everyone needs the same version.** The easiest way is to give your friends the same archive.
 
-## Как играть
+## How to play
 
-### Хост
-- `MULTIPLAYER` → `CO-OP: HOST CAMPAIGN` → выберите уровень и число игроков → `START`.
+### Host
+- `MULTIPLAYER` → `CO-OP: HOST CAMPAIGN` → choose the level and the number of players → `START`.
 
-### Клиент
-- `MULTIPLAYER` → `CO-OP: JOIN BY IP` → введите IP хоста → `CONNECT`.
-  Последние 5 адресов сохраняются и показываются списком (файл `GameData\Save\ModCoop.ini`).
-  Если хост не ответил примерно за 17 секунд, на этом экране появится подсказка, что проверить.
+### Client
+- `MULTIPLAYER` → `CO-OP: JOIN BY IP` → enter the host's IP address → `CONNECT`.
+  The last 5 addresses are saved and shown as a list (file `GameData\Save\ModCoop.ini`).
+  If the host doesn't answer within about 17 seconds, this screen shows what to check.
 
-Порт по умолчанию — **7777 (UDP)**. Если хост указал другой порт, вводите `IP:ПОРТ`.
+The default port is **7777 (UDP)**. If the host uses another port, enter `IP:PORT`.
 
-### Как узнать IP хоста
-- **Одна локальная сеть (LAN):** IP компьютера хоста в сети, например `192.168.1.10`
-  (на ПК хоста: `Win+R` → `cmd` → `ipconfig`, строка «IPv4-адрес»).
-- **Через интернет без проброса портов:** установите на всех ПК одну и ту же VPN-сеть —
-  [ZeroTier](https://www.zerotier.com/), Radmin VPN или Hamachi — и используйте IP хоста **внутри этой VPN**
-  (ZeroTier: обычно `10.x.x.x` / `172.2x.x.x`, Radmin: `26.x.x.x`, Hamachi: `25.x.x.x`).
-- Через «чистый» интернет без VPN нужен проброс порта 7777/UDP на роутере хоста.
+### Finding the host's IP address
+- **Same local network (LAN):** the host computer's address in the network, e.g. `192.168.1.10`
+  (on the host PC: `Win+R` → `cmd` → `ipconfig`, line "IPv4 Address").
+- **Over the internet without port forwarding:** install the same VPN network on every PC —
+  [ZeroTier](https://www.zerotier.com/), Radmin VPN or Hamachi — and use the host's IP address **inside that VPN**
+  (ZeroTier: usually `10.x.x.x` / `172.2x.x.x`, Radmin: `26.x.x.x`, Hamachi: `25.x.x.x`).
+- Over the plain internet without a VPN, port 7777/UDP has to be forwarded on the host's router.
 
-### Проверка на одном компьютере
-Запустите игру дважды и переключите оба окна в оконный режим (`Alt+Enter`). В первом окне создайте кооп-сервер,
-во втором подключитесь к `127.0.0.1`. Управление получает активное окно, переключайтесь мышью.
+### Testing on one computer
+Start the game twice and switch both windows to windowed mode (`Alt+Enter`). Host a co-op game in the first window and
+connect to `127.0.0.1` in the second one. The active window gets the input; switch between them with the mouse.
 
-## Правила кооператива
+## Co-op rules
 
-- **Прогресс — только у хоста.** Кампания разбита на короткие подуровни (GEO_01A, GEO_01B, …).
-  Движок игры не умеет сохраняться в сетевом режиме, поэтому **чекпоинт в кооперативе — начало текущего подуровня**.
-  Сохранения одиночной игры в кооперативе не создаются и не загружаются.
-- **Смерть клиента:** если клиента «ранили», его может поднять другой игрок (подойти и удерживать «Использовать», как с бойцом отряда).
-  Если никто не поднял за 45 секунд или клиент погиб — через 5 секунд он возрождается рядом с хостом.
-- **Смерть хоста:** хоста, как и в одиночной игре, поднимает отряд. Если лежат и хост, и весь отряд, а клиент жив —
-  игра ждёт до 60 секунд, чтобы клиент поднял хоста (сообщение «The host is down!»). Если никто не поднял или хост погиб — подуровень
-  перезапускается для всех (пункт «загрузить чекпоинт» в меню смерти делает то же самое). Клиенты не отключаются.
-- **Обрыв связи / вылет хоста:** клиент через ~15 секунд показывает экран `CO-OP: RECONNECTING`
-  и около минуты пытается переподключиться (кнопка `RETRY NOW` — попытка сразу, `BACK` — выход в меню).
-- **Переходы между уровнями:** все автоматически следуют за хостом.
-- **Отстали от хоста** (например, скриптовая сцена увезла только хоста)? Через 15 секунд вас переместит к хосту.
-  Можно и вручную: откройте консоль (клавиша `~`) и введите `CoopTeleportToHost`.
-- **Брифинги пропускаются** (GEO_01Briefing, RAS_01Briefing, YYY_01Briefing, YYY07Briefing): после последнего уровня
-  эпизода все сразу переходят на первый уровень следующего. Причина — в «Не вошло» в DEVLOG.md.
-- **Титульные карточки** видит только хост; пока хост не закроет титульную карточку эпизода, игра стоит для всех.
-- **Смерть клиента:** до возрождения камера показывает другого игрока со стороны.
-- Пауза (Esc) в сетевой игре не останавливает игру (это ограничение сетевого режима движка).
-- **Клиенты играют за бойцов Дельты.** Когда новый боец появляется по сюжету (GEO_01A — Скорч, GEO_01B — Фиксер), его получает
-  первый свободный клиент: камера перелетает к бойцу, во время сценки его появления управление заблокировано, после неё
-  управление у клиента. Кто за кого играет, хост запоминает (по IP и нику), и на следующих уровнях клиент сразу появляется
-  своим бойцом. Клиенты без бойца играют дополнительными коммандос в цветной броне.
-- Отрядом командует хост. Приказы, которые должен выполнить боец, сыгранный клиентом (подрыв — 62, взлом — 40,
-  снайпер — 07), хост отдать не может: клиент делает это сам («Использовать» на метке).
-- **Подсказки обучения** в кооперативе не показываются.
+- **Only the host's progress counts.** The campaign is split into short parts (GEO_01A, GEO_01B, …).
+  The engine can't save in network games, so **a checkpoint in co-op is the start of the current part**.
+  Single player saves are neither created nor loaded in co-op.
+- **Clients play the Delta squad members.** When a new squad member joins in the story (GEO_01A — Scorch, GEO_01B — Fixer),
+  the closest client without a squad member gets them: the camera flies to the squad member, the client watches the scene
+  through that member's eyes (controls are locked), and takes control once it ends. The host remembers who plays whom (by IP
+  address and name), so on the following levels each client starts as their squad member right away. Clients without a squad
+  member play extra commandos in colored armor.
+- **The host commands the squad.** Orders that have to be carried out by a squad member played by a client (demolition — 62,
+  hacking — 40) can't be given by the host: the client does it themselves ("Use" on the marker). If a client plays Sev (07),
+  they get the hint "Take the sniper position" when the sniper marker appears and have to go to the sniper crate.
+- **Door breach** (from GEO_01C on): the host gives the order as usual, every client playing a squad member gets the message
+  "Delta, gather at the door", and the door is blown as soon as everybody is there.
+- **Keep the sniper position free:** while a player stands at the sniper crate, the AI sniper can't take the position and the
+  scene doesn't go on.
+- **Start of a level:** after a level change the game is paused until every player of the last level is back (up to 60
+  seconds), so nobody misses the intro scene.
+- **When a client goes down:** another player can revive them (walk up and hold "Use", like with a squad member).
+  If nobody does so within 45 seconds or the client dies, they respawn next to the host after 5 seconds. Until then the camera
+  shows another player from behind.
+- **When the host goes down:** the squad revives the host, as in single player. If the host and the whole squad are down but a
+  client is still up, the game waits up to 60 seconds for the client to revive the host (message "The host is down!"). If nobody
+  does or the host dies, the current part restarts for everybody (the "load checkpoint" option in the death menu does the same).
+  Clients stay connected.
+- **Lost connection / host crash:** after about 15 seconds the client shows the `CO-OP: RECONNECTING` screen and tries to
+  reconnect for about a minute (`RETRY NOW` tries at once, `BACK` returns to the menu).
+- **Level changes:** everybody follows the host automatically.
+- **Left behind** (e.g. a scripted scene moved only the host)? After 15 seconds you are moved to the host.
+  You can also do it yourself: open the console (`~` key) and enter `CoopTeleportToHost`.
+- **Briefings are skipped** (GEO_01Briefing, RAS_01Briefing, YYY_01Briefing, YYY07Briefing): after the last level of an
+  episode everybody goes straight to the first level of the next one. The reason is described in DEVLOG.md.
+- **Title cards** are shown to the host only; the game waits for everybody until the host closes the title card of an episode.
+- Pausing (Esc) doesn't stop a network game (a limitation of the engine's network mode).
+- **Tutorial hints** are not shown in co-op.
 
-## Поддерживаемые уровни
+## Supported levels
 
-Все 50 игровых уровней кампании (выбираются в меню хоста):
+All 50 playable levels of the campaign (chosen in the host menu):
 
-| Эпизод | Уровни |
+| Episode | Levels |
 |---|---|
 | Geonosis | GEO_01A, GEO_01B, GEO_01C, GEO_03A, GEO_03C, GEO_03D, GEO_04A, GEO_04B, GEO_04C, GEO_04D, GEO_05A, GEO_05B, GEO_05C |
 | Assault Ship | RAS_01A, RAS_01B, RAS_01C, RAS_02A, RAS_02B, RAS_02C, RAS_02D, RAS_02E, RAS_03A, RAS_03B, RAS_03C, RAS_04A, RAS_04B, RAS_04C, RAS_04D |
 | Kashyyyk | YYY_01B, YYY_01C, YYY_01D, YYY_01E, YYY_35A, YYY_35B, YYY_35C, YYY_04A, YYY_04B, YYY_04C, YYY_04E, YYY_04F, YYY_05A, YYY_05B, YYY_05C, YYY_05D, YYY_05E, YYY_05F, YYY_06A, YYY_06B, YYY_06C, YYY_06D |
 
-Не поддерживаются: **пролог (PRO)** и **брифинги** (GEO_01Briefing, RAS_01Briefing, YYY_01Briefing, YYY07Briefing) —
-на них клиенты вылетают, поэтому мод их пропускает. Эпилог (EPILOGUE) работает.
+Not supported: the **prologue (PRO)** and the **briefings** (GEO_01Briefing, RAS_01Briefing, YYY_01Briefing, YYY07Briefing) —
+clients crash on them, so the mod skips them. The epilogue (EPILOGUE) works.
 
-Каждый уровень проверен на загрузку, подключение клиента и переход дальше. Полностью пройден вдвоём ни один уровень
-ещё не был — если на каком-то уровне что-то сломается, пришлите `System\CoopHost.log` / `CoopClient.log` (или `CT.log`).
+Every level has been checked for loading, a client connecting and moving on to the next level. No level has been played all
+the way through in co-op yet — if something breaks on a level, please send `CT.log`.
 
-Можно сократить список уровней в меню хоста: в `GameData\Save\ModCoop.ini` в секции `[ModCoop.CoopConfig]`
-добавьте по строке на каждый нужный уровень: `CoopLevels+=GEO_01A`, `CoopLevels+=GEO_01B`, … (именно `+=`).
+You can shorten the list of levels in the host menu: in `GameData\Save\ModCoop.ini`, section `[ModCoop.CoopConfig]`, add one
+line per level you want: `CoopLevels+=GEO_01A`, `CoopLevels+=GEO_01B`, … (with `+=`).
 
-## Типичные проблемы
+## Graphics mods
 
-| Проблема | Решение |
+Mods that only change textures, models, shaders or rendering (high resolution texture packs, ReShade, DXVK, dgVoodoo,
+widescreen fixes) don't affect co-op, but **all players must have the same game packages**. The engine compares the package
+files (`.u`, `.utx`, `.usx`, `.ukx`, maps) of the client and the host and drops the connection if they differ. So install mods
+that replace such files for every player in the same way, or for nobody. External tools (ReShade, DXVK, dgVoodoo) don't touch
+the game files and are safe. Mods that change `System\*.u` (`Engine.u`, `CTGame.u` etc.) or replace `CT.exe`/`Mod.u` are not
+compatible with co-op.
+
+## Common problems
+
+| Problem | Solution |
 |---|---|
-| Клиент не может подключиться: `NO ANSWER FROM THE HOST` или пустая клетчатая комната | Хост не отвечает. По порядку: **1)** хост запустил сервер (в его `CoopHost.log` есть строка `TcpNetDriver on port 7777`); **2)** на ПК хоста при первом запуске разрешён брандмауэр (если ответили «Нет» — удалите `GameData\Save\ModCoopFirewall.done` и запустите игру снова); **3)** вы подключаетесь к IP хоста **в ZeroTier** (в клиенте ZeroTier у хоста, «Managed IPs»), а не к его домашнему IP; **4)** оба ПК в одной сети ZeroTier и отмечены `Auth` на my.zerotier.com; **5)** zapret/антивирус/другой VPN — временно выключите и попробуйте снова. Клетчатая комната — это служебная карта, на которой игра ждёт подключения; текстуры в порядке. |
-| Хост пишет в логе `Login request`/`Login from ...`, а клиента сразу выкидывает (у клиента в логе `Welcomed by server`, затем `Close`) | **У вас разные версии мода.** Каждая сборка мода уникальна, и движок молча обрывает подключение при несовпадении файлов. Оба игрока должны распаковать **один и тот же архив** (версия видна в заголовке меню, например `CO-OP CAMPAIGN: JOIN (MOD 0.55)`, и в начале лога: `ModCoop version 0.55`). Хост пишет в лог `ModCoop version mismatch` с версиями обоих игроков. Версии до 0.4 назывались 1.x (релиз 0.3 в меню показывает `MOD 1.3`). |
-| zapret (zapret-discord-youtube) | Сам по себе не мешает адресам ZeroTier `10.x.x.x`, `172.16–31.x.x` и локальной сети: они в его `ipset-exclude.txt`. Но с включённым **Game Filter** он перехватывает все UDP-порты 1024–65535, поэтому для Radmin (`26.x.x.x`), Hamachi (`25.x.x.x`) или если вы меняли списки — выключите Game Filter (service.bat → пункт 4) или добавьте адрес хоста в `lists\ipset-exclude-user.txt`. |
-| Подключение есть, но сразу выкидывает с «SERVER CONTENT ... IS NOT PRESENT» | У клиента другая версия мода или нет мода. Установите тот же архив, что у хоста. |
-| «YOUR CD KEY IS INVALID OR IN USE» | Хост снимает проверку ключей автоматически; если сообщение осталось — перезапустите хост. |
-| Не открывается пункт CO-OP в меню | Игра запущена не через `CT.exe`, или в `System.ini` выключено `EnableCustomMenu` в секции `[Mod.SWRCFix]`. Запускайте игру ярлыком «Star Wars Republic Commando Co-op» или `GameData\System\CT.exe`. |
-| Не запускается вообще ничего (ни `CT.exe`, ни обычный `SWRepublicCommando.exe`), особенно если игру скопировали с другого ПК | **1)** Скопирована папка `GameData\Save` с чужими настройками (разрешение, звук, видеокарта, рендер `Mod.ModRenderDevice`). Запустите `GameData\System\RestoreDefaultSystemSettings.bat` — он переименует `Save\System.ini` в `BackupSystem.ini`, и игра создаст настройки заново. Если не помогло, так же переименуйте `Save\User.ini`. **2)** Стоит старый архив мода (1.0/1.1): его файлы требовали «Visual C++ 2015–2022 x86». Начиная с 1.2 он не нужен — распакуйте архив 1.2. **3)** Обе копии игры должны быть одной версии: не смешивайте файлы двух разных раздач в одной папке. |
-| Игра вылетает при запуске `CT.exe` | Проверьте, что распаковали **все** файлы архива с заменой (особенно `Mod.u` и `Mod.dll` — они должны быть из этого архива). |
-| Хост вышел из игры | Клиенты 12 раз пытаются переподключиться (около 4 минут), затем пишут «THE HOST IS NOT AVAILABLE» — нажмите `BACK`. Если хост перезапустит сервер в это время, клиенты подключатся сами. |
-| Застряли / провалились | Консоль (`~`) → `CoopTeleportToHost`. |
-| Где логи | `GameData\System\CT.log`. Он перезаписывается при каждом запуске: после проблемы сохраните его копию до следующего запуска. |
-| Версия игры | Нужна версия 1.0 с обновлением (GOG/Steam/диск с патчем). Все игроки — одна и та же версия игры. |
+| The client can't connect: `NO ANSWER FROM THE HOST` or an empty checkered room | The host doesn't answer. Check in this order: **1)** the host has started the server (their `CT.log` contains the line `TcpNetDriver on port 7777`); **2)** the firewall was allowed on the host PC at the first start (if you answered "No", delete `GameData\Save\ModCoopFirewall.done` and start the game again); **3)** you connect to the host's IP address **in ZeroTier** (shown in the host's ZeroTier client under "Managed IPs"), not to their home IP address; **4)** both PCs are in the same ZeroTier network and marked `Auth` on my.zerotier.com; **5)** zapret, antivirus software or another VPN — turn them off for a moment and try again. The checkered room is a placeholder map the game shows while it waits for the connection; your textures are fine. |
+| The host's log shows `Login request`/`Login from ...`, but the client is dropped right away (the client's log shows `Welcomed by server`, then `Close`) | **You have different versions of the mod.** Every build of the mod is unique, and the engine silently drops the connection if the files don't match. Both players must extract **the same archive** (the version is shown in the menu title, e.g. `CO-OP CAMPAIGN: JOIN (MOD 0.58)`, and at the start of the log: `ModCoop version 0.58`). The host writes `ModCoop version mismatch` with both versions to its log. Versions before 0.4 were called 1.x (release 0.3 shows `MOD 1.3` in the menu). |
+| zapret (zapret-discord-youtube) | By itself it doesn't affect ZeroTier addresses `10.x.x.x`, `172.16–31.x.x` or the local network: they are in its `ipset-exclude.txt`. But with **Game Filter** enabled it intercepts all UDP ports 1024–65535, so for Radmin (`26.x.x.x`), Hamachi (`25.x.x.x`) or if you changed the lists, turn Game Filter off (service.bat → option 4) or add the host's address to `lists\ipset-exclude-user.txt`. |
+| Connected, but dropped right away with "SERVER CONTENT ... IS NOT PRESENT" | The client has a different version of the mod or no mod at all. Install the same archive as the host. |
+| "YOUR CD KEY IS INVALID OR IN USE" | Since 0.57 the host doesn't check the CD keys of clients. If you see this message, the host has an old version of the mod. |
+| The CO-OP menu entries don't open | The game wasn't started with `CT.exe`, or `EnableCustomMenu` is turned off in the `[Mod.SWRCFix]` section of `System.ini`. Start the game with the "Star Wars Republic Commando Co-op" shortcut or `GameData\System\CT.exe`. |
+| Nothing starts at all (neither `CT.exe` nor the normal `SWRepublicCommando.exe`), especially if the game was copied from another PC | **1)** The `GameData\Save` folder was copied with someone else's settings (resolution, sound, graphics card, `Mod.ModRenderDevice` renderer). Run `GameData\System\RestoreDefaultSystemSettings.bat`: it renames `Save\System.ini` to `BackupSystem.ini` and the game creates new settings. If that doesn't help, rename `Save\User.ini` in the same way. **2)** An old archive of the mod (1.0/1.1) is installed: its files required "Visual C++ 2015–2022 x86". Since 1.2 it isn't needed — extract a current archive. **3)** Both copies of the game must be the same version: don't mix files of two different releases in one folder. |
+| The game crashes when `CT.exe` starts | Make sure you extracted **all** files of the archive and replaced the old ones (especially `Mod.u` and `Mod.dll` — they must come from this archive). |
+| The host left the game | Clients try to reconnect 12 times (about 4 minutes), then show "THE HOST IS NOT AVAILABLE" — press `BACK`. If the host starts the server again in the meantime, the clients connect by themselves. |
+| Stuck or fell through the floor | Console (`~`) → `CoopTeleportToHost`. |
+| Where are the logs? | `GameData\System\CT.log`. It is overwritten every time the game starts: after a problem, save a copy before you start the game again. |
+| Game version | You need version 1.0 with the update (GOG, Steam or the disc version with the patch). All players need the same version of the game. |
 
-## Удаление
+## Uninstalling
 
-Удалите из `GameData\System` файлы `ModCoop.u` и `ModCoop.dll`, из `GameData\Save` — `ModCoop.ini`, `ModCoopShortcut.done`
-и `ModCoopFirewall.done`, а также ярлык с рабочего стола. Правило брандмауэра «SWRC Coop (CT.exe)» удаляется в
-«Брандмауэр Защитника Windows → Дополнительные параметры». Остальные файлы (`CT.exe`, `Mod.*`) — исправления сообщества
-SWRC-Modding/CT, их можно оставить.
+Delete `ModCoop.u` and `ModCoop.dll` from `GameData\System`, `ModCoop.ini`, `ModCoopShortcut.done` and `ModCoopFirewall.done`
+from `GameData\Save`, and the shortcut on the desktop. The firewall rule "SWRC Coop (CT.exe)" can be removed under
+"Windows Defender Firewall → Advanced settings". The other files (`CT.exe`, `Mod.*`) are fixes of the SWRC-Modding/CT
+community and can stay.

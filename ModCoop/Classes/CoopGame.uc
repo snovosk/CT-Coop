@@ -40,6 +40,7 @@ var bool      bTestPanelHost;
 var byte      TestPanelType;
 var string    TestOptions;
 var SquadMarker TestMarker;
+var bool    bTestResSet;
 var string  TestEvents;
 var float   NextTestEvent;
 var int     TestChainStage;
@@ -94,6 +95,13 @@ struct FiredEvent
 };
 var array<ScriptWatch> ScriptWatches;
 var array<FiredEvent>  FiredEvents;
+var array<Prop>        EffectProps;         // See SyncPropEffects
+var array<name>        EffectPropStates;
+var array<Pawn>        HealthPawns;        // See SyncSquadHealth
+var array<float>       SentHealths;
+var MissionObjectives  Objectives;          // See SyncObjectives
+var string             SentObjectives;
+var float              NextObjectivesResend;
 var array<SquadMarker> ClientSnipeMarkers; // See CheckClientSnipers: 1 entry per marker, asked or done
 var array<byte>        ClientSnipeStates;  // 1 = the client was asked to take the position, 2 = in position
 var bool  bWaitingForClients;    // See WaitForClients
@@ -501,8 +509,17 @@ function Timer()
 	InitFixes();
 	CleanUpOrphans();
 	RemoveUplink();
+
+	// Test: CoopTestRes=1280x720 changes the host's window size (HUD layout at other resolutions)
+	if(!bTestResSet && ParseOption(TestOptions, "CoopTestRes") != "" && GetHost() != None)
+	{
+		bTestResSet = true;
+		GetHost().ConsoleCommand("SETRES " $ ParseOption(TestOptions, "CoopTestRes") $ "w");
+	}
 	DetachClientMembers();
 	CheckMissedEvents();
+	SyncSquadHealth();
+	SyncObjectives();
 	CheckClientSnipers();
 
 	if(!bCheckedLevel)
@@ -625,6 +642,7 @@ event Tick(float DeltaTime)
 		SyncPanelStates(Level.TimeSeconds >= NextIdleStateResend);
 		SyncMapActorCollision();
 		CheckDetonations();
+		SyncPropEffects();
 		CheckGather();
 
 		if(Level.TimeSeconds >= NextIdleStateResend)
@@ -2069,6 +2087,14 @@ function TickTest()
 			return;
 		}
 	}
+	else if(TestAction ~= "squadicons" && TestStep == 0)
+	{
+		// HUD icons of the squad members (see CoopHUD.DrawCoopSquad)
+		for(i = 0; Host.Pawn.Squad != None && i < Host.Pawn.Squad.SquadMembers.Length; i = i + 1)
+			Log("CoopTest: squadicons: " $ Host.Pawn.Squad.SquadMembers[i].Pawn $ " X=" $ Host.Pawn.Squad.SquadMembers[i].HUDIconX $ " Y=" $ Host.Pawn.Squad.SquadMembers[i].HUDIconY $ " Slot=" $ Host.Pawn.Squad.SquadMembers[i].Pawn.SquadHUDSlot);
+
+		Log("CoopTest: squadicons: host slot=" $ Host.Pawn.SquadHUDSlot $ " leader=" $ Host.Pawn.Squad.SquadLeader);
+	}
 	else if(TestAction ~= "squadinfo")
 	{
 		// Logs the commandos of the level and their squads every 2 seconds
@@ -2284,6 +2310,212 @@ function bool IsScriptBusy(Pawn P)
 		return false;
 
 	return !SC.SequenceScript.Actions[SC.ActionNum].IsA('ACTION_WaitForEvent');
+}
+
+// Health of the commandos for the squad icons of the clients (CoopHUD.DrawCoopSquad)
+function SyncSquadHealth()
+{
+	local Pawn P;
+	local Controller C;
+	local int i;
+
+	foreach DynamicActors(class'Pawn', P)
+	{
+		if(!P.IsA('CloneCommando'))
+			continue;
+
+		// The squad icons of the clients show every member, also the ones far away
+		P.bAlwaysRelevant = true;
+
+		for(i = 0; i < HealthPawns.Length; i = i + 1)
+		{
+			if(HealthPawns[i] == P)
+				break;
+		}
+
+		if(i < HealthPawns.Length && SentHealths[i] == P.Health)
+			continue;
+
+		HealthPawns[i] = P;
+		SentHealths[i] = P.Health;
+
+		for(C = Level.ControllerList; C != None; C = C.nextController)
+		{
+			if(CoopPlayer(C) != None && !IsHost(C) && C.Pawn != P)
+				CoopPlayer(C).ClientCoopSetPawnHealth(P, P.Health);
+		}
+	}
+
+	for(i = HealthPawns.Length - 1; i >= 0; i = i - 1)
+	{
+		if(HealthPawns[i] == None || HealthPawns[i].bDeleteMe)
+		{
+			HealthPawns.Remove(i, 1);
+			SentHealths.Remove(i, 1);
+		}
+	}
+}
+
+// The helmet shows the current mission objective, its state only exists on the server
+function SyncObjectives()
+{
+	local string States;
+	local Controller C;
+	local int i;
+
+	if(Objectives == None)
+	{
+		foreach AllActors(class'MissionObjectives', Objectives)
+			break;
+
+		if(Objectives == None)
+			return;
+
+		Objectives.bAlwaysRelevant = true;
+	}
+
+	for(i = 0; i < Objectives.MissionObj.Length; i = i + 1)
+		States = States $ int(Objectives.MissionObj[i].Stat);
+
+	// Sent again every few seconds for clients that joined later
+	if((States $ Objectives.CurrentObjective) == SentObjectives && Level.TimeSeconds < NextObjectivesResend)
+		return;
+
+	SentObjectives = States $ Objectives.CurrentObjective;
+	NextObjectivesResend = Level.TimeSeconds + 5;
+
+	for(C = Level.ControllerList; C != None; C = C.nextController)
+	{
+		if(CoopPlayer(C) != None && !IsHost(C))
+			CoopPlayer(C).ClientCoopSetObjectives(Objectives, States, Objectives.CurrentObjective);
+	}
+}
+
+// Emitters aren't replicated, effects of map actors are spawned on the clients as well (see CoopExtension, SyncPropEffects)
+function ForwardEffect(class<Emitter> EffectClass, vector EffectLocation, rotator EffectRotation, Actor AttachTo)
+{
+	local Controller C;
+
+	if(EffectClass == None)
+		return;
+
+	for(C = Level.ControllerList; C != None; C = C.nextController)
+	{
+		if(CoopPlayer(C) != None && !IsHost(C))
+			CoopPlayer(C).ClientCoopSpawnEffect(EffectClass, EffectLocation, EffectRotation, AttachTo);
+	}
+}
+
+// Damaged and destroyed props (explosive barrels, windows, consoles...) spawn their effects in state code on the server
+function SyncPropEffects()
+{
+	local Prop P;
+	local Emitter E;
+	local int i;
+
+	foreach DynamicActors(class'Prop', P)
+	{
+		for(i = 0; i < EffectProps.Length; i = i + 1)
+		{
+			if(EffectProps[i] == P)
+				break;
+		}
+
+		if(i == EffectProps.Length)
+		{
+			EffectProps[i] = P;
+			EffectPropStates[i] = P.GetStateName();
+			continue;
+		}
+
+		if(EffectPropStates[i] == P.GetStateName())
+			continue;
+
+		EffectPropStates[i] = P.GetStateName();
+		E = None;
+
+		if(P.IsInState('PropDamaged'))
+			E = P.DamagedState.SpawnedEmitter;
+		else if(P.IsInState('PropDestroyed') || P.IsInState('Exploding'))
+			E = P.DestroyedState.SpawnedEmitter;
+
+		if(E != None && !E.bDeleteMe)
+		{
+			if(E.Base == P)
+				ForwardEffect(E.Class, E.Location, E.Rotation, P);
+			else
+				ForwardEffect(E.Class, E.Location, E.Rotation, None);
+		}
+	}
+
+	for(i = EffectProps.Length - 1; i >= 0; i = i - 1)
+	{
+		if(EffectProps[i] == None || EffectProps[i].bDeleteMe)
+		{
+			EffectProps.Remove(i, 1);
+			EffectPropStates.Remove(i, 1);
+		}
+	}
+}
+
+// See CoopExtension: HUD changes of level scripts for every client
+function ForwardObjectiveTracker(Actor A, bool bShow)
+{
+	local Controller C;
+	local vector Loc;
+
+	if(A != None)
+		Loc = A.Location;
+
+	for(C = Level.ControllerList; C != None; C = C.nextController)
+	{
+		if(CoopPlayer(C) != None && !IsHost(C))
+			CoopPlayer(C).ClientCoopObjectiveTracker(A, Loc, bShow);
+	}
+}
+
+function ForwardBlinkHUD(byte Element, float BlinkTime)
+{
+	local Controller C;
+
+	for(C = Level.ControllerList; C != None; C = C.nextController)
+	{
+		if(CoopPlayer(C) != None && !IsHost(C))
+			CoopPlayer(C).ClientCoopBlinkHUD(Element, BlinkTime);
+	}
+}
+
+function ForwardShakeView(float InTime, float SustainTime, float OutTime, vector TranslationMag, rotator RotationMag, float Frequency)
+{
+	local Controller C;
+
+	for(C = Level.ControllerList; C != None; C = C.nextController)
+	{
+		if(CoopPlayer(C) != None && !IsHost(C))
+			CoopPlayer(C).ClientCoopShakeView(InTime, SustainTime, OutTime, TranslationMag, RotationMag, Frequency);
+	}
+}
+
+function ForwardScreenFade(float FadeTime, color FadeColor)
+{
+	local Controller C;
+
+	for(C = Level.ControllerList; C != None; C = C.nextController)
+	{
+		if(CoopPlayer(C) != None && !IsHost(C))
+			CoopPlayer(C).ClientCoopScreenFade(FadeTime, FadeColor);
+	}
+}
+
+function ForwardCriticalMessage(string Message, float Duration, color TextColor)
+{
+	local Controller C;
+
+	for(C = Level.ControllerList; C != None; C = C.nextController)
+	{
+		if(CoopPlayer(C) != None && !IsHost(C))
+			CoopPlayer(C).ClientCoopCriticalMessage(Message, Duration, TextColor);
+	}
 }
 
 /*
@@ -3161,6 +3393,7 @@ function SendPlayer(PlayerController aPlayer, string URL)
 
 defaultproperties
 {
+	HUDType="ModCoop.CoopHUD"
 	MaxCoopPlayers=4
 	ClientRespawnDelay=5.0
 	bClientsTakeOverSquad=True
