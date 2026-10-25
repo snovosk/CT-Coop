@@ -64,6 +64,7 @@ struct SentPanelState
 	var byte Flags;
 	var byte ItemType;
 	var Pawn User;
+	var bool        bMarkerEvents;  // See SyncPanelStates
 };
 var array<SentPanelState> SentPanelStates;
 
@@ -794,6 +795,24 @@ function SyncPanelStates(bool bResendAll)
 			SentPanelStates[i].Flags = 255; // Always send the first time
 		}
 
+		/*
+		 * A player who does the job of a squad marker himself (a client playing the specialist: Scorch places the charge to Fixer's
+		 * door on GEO_01B) doesn't start the marker, so its events never came: the level waited for BrokenDoorDemoUnderway forever
+		 * and the enemies of the next rooms were never spawned. The events are triggered as the marker would.
+		 */
+		if(Item.bActivating && !SentPanelStates[i].bMarkerEvents && Item.SquadMarker != None && !Item.SquadMarker.bMarkerActive &&
+		   (Item.bPlayerActivated || PlayerController(Item.User) != None))
+		{
+			SentPanelStates[i].bMarkerEvents = true;
+			Log("CoopGame: " $ Item $ " is used by a player instead of " $ Item.SquadMarker $ ", triggering its events " $ Item.SquadMarker.Event $ " " $ Item.SquadMarker.EventUnderway);
+
+			if(Item.SquadMarker.Event != '')
+				TriggerEvent(Item.SquadMarker.Event, Item.SquadMarker, UserPawn);
+
+			if(Item.SquadMarker.EventUnderway != '')
+				TriggerEvent(Item.SquadMarker.EventUnderway, Item.SquadMarker, UserPawn);
+		}
+
 		// E.g. an armed demolition charge becomes a plunger (AIT_Plunger) for the player that placed it
 		// Progress bars and timers while something is being set up or counts down
 		if(Item.bActivating || (Item.bActivated && Item.DurationRemaining > 0))
@@ -908,6 +927,10 @@ function CheckGather()
 
 	Log("CoopGame: squad gathered at " $ GatherMarker.Anchor $ ", breaching");
 	ActivateItem(GatherMarker.Anchor).User = GetHost();
+
+	// The events the marker would trigger (see SyncPanelStates)
+	if(GatherMarker.Event != '')
+		TriggerEvent(GatherMarker.Event, GatherMarker, GetHost().Pawn);
 
 	if(GatherMarker.EventUnderway != '')
 		TriggerEvent(GatherMarker.EventUnderway, GatherMarker, GetHost().Pawn);
@@ -1798,7 +1821,8 @@ function TickTest()
 		}
 		else if(C != None)
 		{
-			Log("CoopTest: door: State=" $ TestPanel.GetStateName() $ " Usable=" $ TestPanel.bIsUsable $ " Activating=" $ TestPanel.bActivating $ " Fraction=" $ TestPanel.FractionComplete $ " ClientState=" $ C.GetStateName() $ " TargetType=" $ CoopPlayer(C).TargetType $ " Target=" $ CoopPlayer(C).Target);
+			foreach AllActors(class'Actor', A2, 'SpawnControlRoom') { Log("CoopTest: door: factory " $ A2 $ " State=" $ A2.GetStateName()); break; }
+			Log("CoopTest: door: Weapon=" $ C.Pawn.Weapon $ " WeaponState=" $ C.Pawn.Weapon.GetStateName() $ " Pending=" $ C.Pawn.PendingWeapon $ " Inv=" $ C.Pawn.Inventory $ " State=" $ TestPanel.GetStateName() $ " Usable=" $ TestPanel.bIsUsable $ " Activating=" $ TestPanel.bActivating $ " Fraction=" $ TestPanel.FractionComplete $ " ClientState=" $ C.GetStateName() $ " TargetType=" $ CoopPlayer(C).TargetType $ " Target=" $ CoopPlayer(C).Target);
 		}
 
 		if(TestStep < 60)
@@ -1874,7 +1898,13 @@ function TickTest()
 	{
 		// Logs the squad markers and the scripts that wait for the squad
 		foreach AllActors(class'SquadMarker', M)
-			Log("CoopTest: levelinfo: marker " $ M.Class.Name $ " " $ M $ " Tag=" $ M.Tag $ " Event=" $ M.Event $ " Active=" $ M.bMarkerActive $ " Required=" $ M.MembersRequired $ " Anchor=" $ M.Anchor $ " Loc=" $ M.Location);
+			Log("CoopTest: levelinfo: marker " $ M.Class.Name $ " " $ M $ " Tag=" $ M.Tag $ " Event=" $ M.Event $ " Underway=" $ M.EventUnderway $ " Completed=" $ M.EventCompleted $ " Active=" $ M.bMarkerActive $ " Required=" $ M.MembersRequired $ " Anchor=" $ M.Anchor $ " Loc=" $ M.Location);
+
+		foreach AllActors(class'Actor', A2)
+		{
+			if(A2.IsA('Factory') || A2.IsA('Trigger') || A2.IsA('TriggerVolume') || A2.IsA('Volume') && A2.Event != '')
+				Log("CoopTest: levelinfo: actor " $ A2.Class.Name $ " " $ A2 $ " Tag=" $ A2.Tag $ " Event=" $ A2.Event $ " State=" $ A2.GetStateName() $ " Loc=" $ A2.Location);
+		}
 
 		foreach AllActors(class'ScriptedSequence', SS)
 		{
@@ -3188,6 +3218,18 @@ function TakeOver(CoopPlayer CP, Pawn P, bool bMoveCamera)
 	// Scripts crouch or hurt squad members (Fixer is hurt in his scene): a player starts standing and healthy
 	P.ShouldCrouch(false);
 	P.bWantsToCrouch = false;
+
+	// Scripts walk squad members to their positions with an analog speed (Scorch on GEO_01A): the player moved slowly and couldn't
+	// crouch until the next level
+	P.SetWalking(false);
+	P.bUseAnalogSpeed = P.default.bUseAnalogSpeed;
+	P.bUseSpeedScaler = P.default.bUseSpeedScaler;
+	P.AnalogSpeed = P.default.AnalogSpeed;
+	P.MaximumDesiredSpeed = P.default.MaximumDesiredSpeed;
+	P.GroundSpeed = P.default.GroundSpeed;
+	P.bCanCrouch = P.default.bCanCrouch;
+	P.bCanJump = P.default.bCanJump;
+	P.bCanWalk = P.default.bCanWalk;
 	P.Health = Max(P.Health, P.default.Health);
 	CP.ClientSetRotation(P.Rotation);
 	CP.IncapacitatedTime = 0;

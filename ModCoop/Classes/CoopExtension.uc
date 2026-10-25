@@ -28,6 +28,8 @@ var FunctionOverride ObjectiveUpdateOverride;
 var FunctionOverride CriticalMessageOverride;
 var FunctionOverride ActivateItemTransitionOverride; // Effects for the clients (see CoopGame.ForwardEffect)
 var FunctionOverride DispenserTransitionOverride;
+var FunctionOverride FactoryRangeTestOverride;     // Players without a pawn (see FactoryPlayerRangeTest)
+var FunctionOverride FactoryCovertOverride;
 
 function Init(SWRCFix Fix)
 {
@@ -83,6 +85,10 @@ function Init(SWRCFix Fix)
 	ActivateItemTransitionOverride.Init(class'ActivateItem', 'MakeTransition', self, 'ActivateItemMakeTransition');
 	DispenserTransitionOverride = new class'FunctionOverride';
 	DispenserTransitionOverride.Init(class'DroidDispenser', 'MakeTransition', self, 'DispenserMakeTransition');
+	FactoryRangeTestOverride = new class'FunctionOverride';
+	FactoryRangeTestOverride.Init(class'Factory', 'PlayerRangeTest', self, 'FactoryPlayerRangeTest');
+	FactoryCovertOverride = new class'FunctionOverride';
+	FactoryCovertOverride.Init(class'Factory', 'IsLocationCovert', self, 'FactoryIsLocationCovert');
 }
 
 /*
@@ -384,6 +390,67 @@ function DispenserMakeTransition(DroidDispenser.TransitionInfo Info)
 
 	if(Info.TransitionEffect != None && CoopGame(D.Level.Game) != None)
 		CoopGame(D.Level.Game).ForwardEffect(Info.TransitionEffect, D.Location + Info.TransitionEffectOffset, D.Rotation, D);
+}
+
+/*
+ * Enemy factories check every player controller's pawn: players without one (joining, waiting to spawn, dead) were taken as
+ * standing at the origin of the map. Same code, players without a pawn are skipped.
+ */
+function bool FactoryPlayerRangeTest(vector Location)
+{
+	local Factory F;
+	local PlayerController P;
+	local float MaxSq, MinSq, PlayDist;
+
+	F = Factory(FactoryRangeTestOverride.CurrentSelf);
+
+	if(F.MinPlayerRange >= F.MaxPlayerRange)
+		return true;
+
+	MaxSq = F.MaxPlayerRange * F.MaxPlayerRange;
+	MinSq = F.MinPlayerRange * F.MinPlayerRange;
+
+	foreach F.DynamicActors(class'PlayerController', P)
+	{
+		if(P.Pawn == None)
+			continue;
+
+		PlayDist = VSize(P.Pawn.Location - Location);
+		PlayDist = PlayDist * PlayDist;
+
+		if(PlayDist >= MinSq && PlayDist <= MaxSq)
+			return true;
+	}
+
+	return false;
+}
+
+function bool FactoryIsLocationCovert(vector LocationToTest)
+{
+	local Factory F;
+	local PlayerController P;
+	local vector HitLocation, HitNormal, PlayerEyePosition;
+	local Actor HitActor;
+
+	F = Factory(FactoryCovertOverride.CurrentSelf);
+
+	foreach F.DynamicActors(class'PlayerController', P)
+	{
+		if(P.Pawn == None)
+			continue;
+
+		PlayerEyePosition = P.Pawn.Location + P.Pawn.EyePosition();
+
+		if((vector(P.Rotation) dot Normal(LocationToTest - PlayerEyePosition)) > Cos(P.FOVAngle * 0.5 * 0.01745))
+		{
+			HitActor = F.Trace(HitLocation, HitNormal, PlayerEyePosition, LocationToTest, false);
+
+			if(HitActor == None || HitActor == P.Pawn)
+				return false;
+		}
+	}
+
+	return true;
 }
 
 // Critical messages of scripts are shown by the HUDs on the server, remote clients have none there

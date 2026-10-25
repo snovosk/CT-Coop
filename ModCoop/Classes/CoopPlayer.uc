@@ -44,6 +44,11 @@ struct SmoothedPawn
 	var vector BasePrePivot;
 };
 var array<SmoothedPawn> SmoothedPawns;
+var vector      BlockCheckLocation;   // Client only: see CheckBlocked
+var float       BlockCheckTime;
+var float       NextBlockLog;
+var float       NextCorrectionLog;
+var float       HandSignalActiveTime; // Client only: see FixHandSignalWeapon
 var float       HandSignalIdleTime;   // Client only: see FixHandSignalWeapon
 var bool        bPlayedHandSignalAnim;
 var Actor       ClientAttachItem;     // Client only: item in the hand during a hand signal (see SetupClientHandSignal)
@@ -256,8 +261,81 @@ simulated function ApplyHostSkin()
  * HandSignal (the hands used for panels, demolition charges and the detonator) switches back to the previous weapon in Idle.Tick,
  * which only runs on the server: a client kept empty hands after using a panel. Same condition as HandSignal.Idle.Tick.
  */
+/*
+ * Diagnostics for invisible walls on clients: when the player keeps moving but the pawn stays where it is, the log says what it ran
+ * into (traced from the knees and the chest in the direction of the movement). See also LongClientAdjustPosition.
+ */
+simulated function CheckBlocked()
+{
+	local vector Dir, HitLocation, HitNormal;
+	local Actor HitKnee, HitChest;
+
+	if(Pawn == None || Pawn.Physics != PHYS_Walking || VSize(Pawn.Acceleration) < 1)
+	{
+		BlockCheckTime = 0;
+		return;
+	}
+
+	if(BlockCheckTime == 0 || VSize(Pawn.Location - BlockCheckLocation) > 20)
+	{
+		BlockCheckTime = Level.TimeSeconds;
+		BlockCheckLocation = Pawn.Location;
+		return;
+	}
+
+	if(Level.TimeSeconds - BlockCheckTime < 0.5 || Level.TimeSeconds < NextBlockLog)
+		return;
+
+	NextBlockLog = Level.TimeSeconds + 2;
+	Dir = Normal(Pawn.Acceleration * vect(1,1,0)) * (Pawn.CollisionRadius + 40);
+	HitKnee = Trace(HitLocation, HitNormal, Pawn.Location + Dir - vect(0,0,1) * Pawn.CollisionHeight * 0.5, Pawn.Location - vect(0,0,1) * Pawn.CollisionHeight * 0.5, true);
+	HitChest = Trace(HitLocation, HitNormal, Pawn.Location + Dir + vect(0,0,1) * Pawn.CollisionHeight * 0.5, Pawn.Location + vect(0,0,1) * Pawn.CollisionHeight * 0.5, true);
+	Log("ModCoop: Blocked at " $ Pawn.Location $ " moving " $ Normal(Pawn.Acceleration) $ " knee=" $ HitKnee $ " (" $ HitKnee.Class $ " " $ HitKnee.StaticMesh $ ") chest=" $ HitChest $ " (" $ HitChest.Class $ " " $ HitChest.StaticMesh $ ") level=" $ Level.Title);
+}
+
+// Large corrections of the client's position by the server mean the server's pawn is stopped by something the client doesn't have
+function LongClientAdjustPosition(float TimeStamp, name newState, EPhysics newPhysics, float NewLocX, float NewLocY, float NewLocZ, float NewVelX, float NewVelY, float NewVelZ, Actor NewBase, float NewFloorX, float NewFloorY, float NewFloorZ)
+{
+	local vector NewLocation;
+
+	if(Pawn != None && Level.NetMode == NM_Client && Level.TimeSeconds >= NextCorrectionLog)
+	{
+		NewLocation.X = NewLocX;
+		NewLocation.Y = NewLocY;
+		NewLocation.Z = NewLocZ;
+
+		if(VSize(NewLocation - Pawn.Location) > 30)
+		{
+			NextCorrectionLog = Level.TimeSeconds + 2;
+			Log("ModCoop: Server corrected the position by " $ int(VSize(NewLocation - Pawn.Location)) $ ": server " $ NewLocation $ " client " $ Pawn.Location);
+		}
+	}
+
+	Super.LongClientAdjustPosition(TimeStamp, newState, newPhysics, NewLocX, NewLocY, NewLocZ, NewVelX, NewVelY, NewVelZ, NewBase, NewFloorX, NewFloorY, NewFloorZ);
+}
+
 simulated function FixHandSignalWeapon(float DeltaTime)
 {
+	// After the detonator the hands kept playing an animation on the client and stayed in Active: the player had no weapon while
+	// the server had already given it back. Hands that are still active after a few seconds without "Use" held go on to Idle.
+	if(Pawn != None && Pawn.Weapon != None && Pawn.Weapon.WeaponType == WT_Marker && Pawn.Weapon.IsInState('Active') && !bUse)
+	{
+		HandSignalActiveTime += DeltaTime;
+
+		if(HandSignalActiveTime > 3)
+		{
+			Log("ModCoop: Hands were stuck in Active, going on to Idle");
+			HandSignalActiveTime = 0;
+			bPlayedHandSignalAnim = false;
+			Pawn.Weapon.GotoState('Idle');
+			return;
+		}
+	}
+	else
+	{
+		HandSignalActiveTime = 0;
+	}
+
 	// The hands wait in Active for the end of their animation, which isn't started on clients: play it (the detonator, placing a
 	// charge...), then go on to Idle
 	if(Pawn != None && Pawn.Weapon != None && Pawn.Weapon.WeaponType == WT_Marker && Pawn.Weapon.IsInState('Active') && !Pawn.Weapon.IsAnimating())
@@ -485,6 +563,7 @@ event PlayerTick(float DeltaTime)
 
 		EnsureClientTeams();
 		FixStuckWeapon();
+		CheckBlocked();
 		FixHandSignalWeapon(DeltaTime);
 		EnsureHeadlamp();
 		EnsureGrenade();
@@ -1058,6 +1137,19 @@ simulated function ClientCoopDumpProps(int Step)
 	{
 		if(Prop(A) != None)
 			Log("CoopTest: propinfo: client " $ Step $ " " $ A $ " Tag=" $ A.Tag $ " State=" $ A.GetStateName() $ " Collide=" $ A.bCollideActors $ A.bBlockActors $ A.bBlockPlayers $ " Hidden=" $ A.bHidden $ " Mesh=" $ A.StaticMesh $ " Role=" $ A.Role $ " Physics=" $ A.Physics $ " Loc=" $ A.Location $ " Rot=" $ A.Rotation);
+	}
+
+	// Actors that only exist on this client and block players (the server's copy is gone or was never there)
+	foreach AllActors(class'Actor', A)
+	{
+		if(A.Role == ROLE_Authority && !A.bStatic && !A.bNoDelete && A.bBlockPlayers && A.bCollideActors && Controller(A) == None && A != Pawn)
+			Log("CoopTest: propinfo: localblock " $ Step $ " " $ A $ " (" $ A.Class $ ") Mesh=" $ A.StaticMesh $ " Physics=" $ A.Physics $ " Loc=" $ A.Location);
+	}
+
+	foreach AllActors(class'Actor', A)
+	{
+		if(A.Role == ROLE_Authority && A.bNoDelete && !A.bStatic && A.bBlockPlayers && A.bCollideActors && A.RemoteRole != ROLE_None)
+			Log("CoopTest: propinfo: localnodelete " $ Step $ " " $ A $ " (" $ A.Class $ ") Mesh=" $ A.StaticMesh $ " Loc=" $ A.Location);
 	}
 }
 
