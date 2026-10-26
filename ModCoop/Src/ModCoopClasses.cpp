@@ -24,6 +24,8 @@ FNativeEntry<UCoopNative> UCoopNative::StaticNativeMap[] = {
 	MAP_NATIVE(ReadSavedString,0)
 	MAP_NATIVE(WriteSavedString,0)
 	MAP_NATIVE(InstallClientFixes,0)
+	MAP_NATIVE(SetDebugStep,0)
+	MAP_NATIVE(LogSystemInfo,0)
 	{NULL,NULL}
 };
 LINK_NATIVES(UCoopNative);

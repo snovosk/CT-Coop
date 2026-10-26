@@ -10,7 +10,9 @@ class CoopHUD extends CTHUD;
  */
 
 var Texture SquadIcons;  // HUDTextures.Icons.CloneVisorIcons, the helmet's CloneVisorIcons
-var Texture EventTimer;  // HUDTextures.Reticles.HUD_EventTimer, the helmet's EventTimer
+var Texture EventTimer;
+var Texture NumberFont;  // OrbitFonts.OrbitBold15_PageA, the page of the helmet's Orbit15Font (see DrawNumber)
+var int DigitStarts[10], DigitWidths[10];  // HUDTextures.Reticles.HUD_EventTimer, the helmet's EventTimer
 
 // Order in which the 16 cells (column + 4 * row) of the timer ring fill, a twelfth at a time (UHelmet::DrawTimerRing)
 var byte RingCells[16];
@@ -18,6 +20,7 @@ var byte RingSteps[16];  // The step (1-12) from which the cell is filled
 
 simulated function PostRender(Canvas C)
 {
+	class'CoopNative'.static.SetDebugStep("HUD PostRender");
 	Super.PostRender(C);
 
 	if(!bHideHUD && PlayerOwner != None && PlayerOwner.Pawn != None && (PlayerOwner.Helmet == None || PlayerOwner.Helmet.bDraw) &&
@@ -74,7 +77,7 @@ simulated function DrawSquadIcon(Canvas C, Pawn P, int Slot, bool bTint)
 	local float SX, SY, X, T, Pulse;
 	local byte IconX, IconY, MarkerState, Alpha;
 	local bool bTarget;
-	local int Base, LabelY;
+	local int Base;
 
 	SX = C.ClipX / 800.0;
 	SY = C.ClipY / 600.0;
@@ -131,22 +134,13 @@ simulated function DrawSquadIcon(Canvas C, Pawn P, int Slot, bool bTint)
 	C.DrawTile(SquadIcons, 20 * SX, 20 * SY, 229 - 27 * IconX, 485 - 27 * IconY, 25, 25);
 
 	// Number: the helmet writes GetHudDescription() with OrbitBold15 at (81, Base - 16), scaled to the screen. Script text can't be
-	// scaled, so the same numbers are taken from the texture (62, 40 and 07 below each other); they are 1.3 times smaller than the
-	// font, measured on screenshots against the helmet's text
-	if(P.IsA('Commando62Delta'))
-		LabelY = 104;
-	else if(P.IsA('Commando40Delta'))
-		LabelY = 120;
-	else
-		LabelY = 136;
-
+	// scaled, so the digits are drawn from the font's page texture, glyph by glyph (DrawNumber)
 	if(P.EndTalkTime > T || bTarget)
 		SetIconColor(C, 255, 255, 255, 200, bTint);
 	else
 		SetIconColor(C, 164, 200, 208, 200, bTint);
 
-	C.SetPos((79.7 + X) * SX, (Base - 13.8) * SY);
-	C.DrawTile(SquadIcons, 29.9 * SX, 19.5 * SY, 151, LabelY, 23, 15);
+	DrawNumber(C, P.GetHudDescription(), int((81 + X) * SX), int((Base - 16) * SY), SX, SY);
 
 	if(MarkerState >= 2)
 		DrawTimerRing(C, 97 + X, Base + 31, SX, SY, (MarkerState - 2) / 12.0, bTint);
@@ -165,6 +159,33 @@ simulated function DrawSquadIcon(Canvas C, Pawn P, int Slot, bool bTint)
 		C.DrawTile(SquadIcons, 8 * SX, 8 * SY, 185, 455, -8, -8);
 		C.SetPos((78 + X) * SX, (Base + 44) * SY);
 		C.DrawTile(SquadIcons, 8 * SX, 8 * SY, 177, 455, 8, -8);
+	}
+}
+
+/*
+ * Like FCanvasUtil::DrawString with OrbitBold15: each character is its rectangle of the font's page texture, stretched with the
+ * screen. The rectangles of the digits were read from OrbitFonts.utx (OrbitBold15: StartV 1, height 27, no kerning).
+ */
+simulated function DrawNumber(Canvas C, string Text, float X, float Y, float SX, float SY)
+{
+	local int i, Digit;
+
+	if(NumberFont == None)
+		NumberFont = Texture(DynamicLoadObject("OrbitFonts.OrbitBold15_PageA", class'Texture'));
+
+	if(NumberFont == None)
+		return;
+
+	for(i = 0; i < Len(Text); i = i + 1)
+	{
+		Digit = Asc(Mid(Text, i, 1)) - 48;
+
+		if(Digit < 0 || Digit > 9)
+			continue;
+
+		C.SetPos(X, Y);
+		C.DrawTile(NumberFont, DigitWidths[Digit] * SX, 27 * SY, DigitStarts[Digit], 1, DigitWidths[Digit], 27);
+		X += DigitWidths[Digit] * SX;
 	}
 }
 
@@ -247,6 +268,26 @@ defaultproperties
 {
 	SquadIcons=Texture'HUDTextures.Icons.CloneVisorIcons'
 	EventTimer=Texture'HUDTextures.Reticles.HUD_EventTimer'
+	DigitStarts(0)=180
+	DigitWidths(0)=16
+	DigitStarts(1)=197
+	DigitWidths(1)=11
+	DigitStarts(2)=209
+	DigitWidths(2)=13
+	DigitStarts(3)=223
+	DigitWidths(3)=15
+	DigitStarts(4)=239
+	DigitWidths(4)=17
+	DigitStarts(5)=257
+	DigitWidths(5)=13
+	DigitStarts(6)=271
+	DigitWidths(6)=16
+	DigitStarts(7)=288
+	DigitWidths(7)=13
+	DigitStarts(8)=302
+	DigitWidths(8)=16
+	DigitStarts(9)=319
+	DigitWidths(9)=16
 	RingCells(0)=1
 	RingCells(1)=0
 	RingCells(2)=5

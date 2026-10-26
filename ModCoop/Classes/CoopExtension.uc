@@ -25,6 +25,10 @@ var FunctionOverride BlinkShieldsOverride;
 var FunctionOverride ShakeViewOverride;
 var FunctionOverride ScreenFadeOverride;
 var FunctionOverride ObjectiveUpdateOverride;
+var FunctionOverride SetCollisionOverride;      // Collision changes of scripts for the clients (see CoopGame.ForwardSetCollision)
+var FunctionOverride SetHiddenOverride;
+var FunctionOverride GotoStateOverride;
+var FunctionOverride PlayAnimOverride;
 var FunctionOverride CriticalMessageOverride;
 var FunctionOverride ActivateItemTransitionOverride; // Effects for the clients (see CoopGame.ForwardEffect)
 var FunctionOverride DispenserTransitionOverride;
@@ -35,6 +39,7 @@ var FunctionOverride FactoryGenerateOverride;
 function Init(SWRCFix Fix)
 {
 	Log("ModCoop version " $ class'CoopConfig'.static.Version());
+	class'CoopNative'.static.LogSystemInfo();
 	class'CoopNative'.static.InstallClientFixes();
 	class'CoopNative'.static.LoadSavedConfig(class'CoopConfig', "ModCoop.ini");
 	class'CoopConfig'.static.LoadLists();
@@ -80,6 +85,14 @@ function Init(SWRCFix Fix)
 	ScreenFadeOverride.Init(class'ACTION_ScreenFade', 'InitActionFor', self, 'ScreenFadeInitActionFor');
 	ObjectiveUpdateOverride = new class'FunctionOverride';
 	ObjectiveUpdateOverride.Init(class'ACTION_ObjectiveUpdate', 'InitActionFor', self, 'ObjectiveUpdateInitActionFor');
+	SetCollisionOverride = new class'FunctionOverride';
+	SetCollisionOverride.Init(class'ACTION_SetCollision', 'InitActionFor', self, 'SetCollisionInitActionFor');
+	SetHiddenOverride = new class'FunctionOverride';
+	SetHiddenOverride.Init(class'ACTION_SetHidden', 'InitActionFor', self, 'SetHiddenInitActionFor');
+	PlayAnimOverride = new class'FunctionOverride';
+	PlayAnimOverride.Init(class'ACTION_PlayAnim', 'InitActionFor', self, 'PlayAnimInitActionFor');
+	GotoStateOverride = new class'FunctionOverride';
+	GotoStateOverride.Init(class'ACTION_GotoState', 'InitActionFor', self, 'GotoStateInitActionFor');
 	CriticalMessageOverride = new class'FunctionOverride';
 	CriticalMessageOverride.Init(class'ACTION_DisplayCriticalMessage', 'InitActionFor', self, 'CriticalMessageInitActionFor');
 	ActivateItemTransitionOverride = new class'FunctionOverride';
@@ -556,6 +569,67 @@ function bool FactoryGenerateActor()
 }
 
 // Critical messages of scripts are shown by the HUDs on the server, remote clients have none there
+// Scripts switch the collision of map actors on the server only (GEO_01B: Hangar01BlockingVolume, an invisible wall in the hangar for
+// clients). Static actors like volumes aren't replicated: the clients do the same by tag.
+function bool SetCollisionInitActionFor(ScriptedController C)
+{
+	local ACTION_SetCollision Action;
+	local bool bResult;
+
+	Action = ACTION_SetCollision(SetCollisionOverride.CurrentSelf);
+	bResult = Action.InitActionFor(C);
+
+	if(Action.CollideActorTag != '' && CoopGame(C.Level.Game) != None)
+		CoopGame(C.Level.Game).ForwardSetCollision(Action.CollideActorTag, Action.bCollideActors, Action.bBlockActors, Action.bBlockPlayers);
+
+	return bResult;
+}
+
+// Same for hiding and showing (GEO_03A: the hologram of the briefing in the elevator)
+function bool SetHiddenInitActionFor(ScriptedController C)
+{
+	local ACTION_SetHidden Action;
+	local bool bResult;
+
+	Action = ACTION_SetHidden(SetHiddenOverride.CurrentSelf);
+	bResult = Action.InitActionFor(C);
+
+	if(Action.HideActorTag != '' && CoopGame(C.Level.Game) != None)
+		CoopGame(C.Level.Game).ForwardSetHidden(Action.HideActorTag, Action.bHidden);
+
+	return bResult;
+}
+
+// Animations of NPC scripts (GEO_03A: the briefing in the elevator) for the clients (see CoopGame.ForwardScriptAnim)
+function bool PlayAnimInitActionFor(ScriptedController C)
+{
+	local ACTION_PlayAnim Action;
+	local bool bResult;
+
+	Action = ACTION_PlayAnim(PlayAnimOverride.CurrentSelf);
+	bResult = Action.InitActionFor(C);
+
+	if(C.Pawn != None && Action.BaseAnim != '' && CoopGame(C.Level.Game) != None)
+		CoopGame(C.Level.Game).ForwardScriptAnim(C.Pawn, Action.BaseAnim, Action.AnimRate, Action.bLoopAnim || Action.AnimIterations > 0);
+
+	return bResult;
+}
+
+// Same for squad markers that a script disables and enables again (GEO_04D: the demolition charge before the spider droids)
+function bool GotoStateInitActionFor(ScriptedController C)
+{
+	local ACTION_GotoState Action;
+	local bool bResult;
+
+	Action = ACTION_GotoState(GotoStateOverride.CurrentSelf);
+	bResult = Action.InitActionFor(C);
+
+	if(Action.TargetTag != '' && Action.TargetTag != 'None' && CoopGame(C.Level.Game) != None)
+		CoopGame(C.Level.Game).ForwardMarkerState(Action.TargetTag, Action.State);
+
+	return bResult;
+}
+
 function bool ObjectiveUpdateInitActionFor(ScriptedController C)
 {
 	local ACTION_ObjectiveUpdate Action;

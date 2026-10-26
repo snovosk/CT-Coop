@@ -32,6 +32,8 @@ public:
     void execReadSavedString(FFrame& Stack, void* Result);
     void execWriteSavedString(FFrame& Stack, void* Result);
     void execInstallClientFixes(FFrame& Stack, void* Result);
+    void execSetDebugStep(FFrame& Stack, void* Result);
+    void execLogSystemInfo(FFrame& Stack, void* Result);
     DECLARE_CLASS(UCoopNative,UObject,0,ModCoop)
     NO_DEFAULT_CONSTRUCTOR(UCoopNative)
     DECLARE_NATIVES(UCoopNative)

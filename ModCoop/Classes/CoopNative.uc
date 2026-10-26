@@ -37,3 +37,10 @@ native static final function WriteSavedString(string IniName, string Section, st
 
 // Native fixes that are needed to play single player maps as a network client
 native static final function InstallClientFixes();
+
+// Crash diagnostics: the last step of the script, logged with the exception if the game crashes (see ModCoop.cpp)
+native static final function SetDebugStep(string Step);
+
+// Writes the computer, Windows, graphics card, the game's exe and the DLL wrappers next to it (d3d9, dgVoodoo, ReShade...) to the log,
+// for test reports
+native static final function LogSystemInfo();

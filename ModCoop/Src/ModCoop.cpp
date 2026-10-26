@@ -4,10 +4,14 @@
 
 #include <shlobj.h>
 #include <shellapi.h>
+#include <stdio.h>
 
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "uuid.lib")
+#pragma comment(lib, "version.lib")
+#pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "user32.lib")
 
 /*
  * CoopNative
@@ -575,9 +579,205 @@ static void FirstStartSetup()
 	}
 }
 
+/*
+ * Crash diagnostics
+ * The crash history of the engine only names guarded native functions and script events, e.g. "CoopPlayer.PlayerTick" without
+ * telling what inside it crashed. A vectored exception handler logs the exception, the module and offset where it happened, the
+ * registers, the return addresses on the stack and the last step the script marked with SetDebugStep. It only logs, the engine
+ * handles the crash as before.
+ */
+static ANSICHAR GCoopDebugStep[256] = "";
+static UBOOL    GInSafeSelectTargetType = 0;
+static LONG GCoopExceptionLogs = 0;
+
+static void DescribeAddress(DWORD Address, ANSICHAR* Out, INT OutSize)
+{
+	HMODULE Module = NULL;
+
+	if(GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCSTR>(Address), &Module) && Module)
+	{
+		ANSICHAR Path[MAX_PATH] = "";
+		GetModuleFileNameA(Module, Path, MAX_PATH);
+		const ANSICHAR* Name = strrchr(Path, '\\');
+		_snprintf_s(Out, OutSize, _TRUNCATE, "%s+0x%X", Name ? Name + 1 : Path, Address - reinterpret_cast<DWORD>(Module));
+	}
+	else
+	{
+		_snprintf_s(Out, OutSize, _TRUNCATE, "0x%08X", Address);
+	}
+
+	Out[OutSize - 1] = 0;
+}
+
+static UBOOL IsCodeAddress(DWORD Address)
+{
+	MEMORY_BASIC_INFORMATION Info;
+
+	if(Address < 0x10000 || !VirtualQuery(reinterpret_cast<LPCVOID>(Address), &Info, sizeof(Info)) || Info.Type != MEM_IMAGE)
+		return 0;
+
+	return (Info.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) != 0;
+}
+
+static INT ReadStack(DWORD* Stack, DWORD* Out, INT MaxOut)
+{
+	INT Count = 0;
+
+	__try
+	{
+		for(INT i = 0; i < 512 && Count < MaxOut; ++i)
+		{
+			if(IsCodeAddress(Stack[i]))
+				Out[Count++] = Stack[i];
+		}
+	}
+	__except(EXCEPTION_EXECUTE_HANDLER)
+	{
+	}
+
+	return Count;
+}
+
+static LONG CALLBACK CoopExceptionHandler(EXCEPTION_POINTERS* Info)
+{
+	DWORD Code = Info->ExceptionRecord->ExceptionCode;
+
+	if(Code != EXCEPTION_ACCESS_VIOLATION && Code != EXCEPTION_INT_DIVIDE_BY_ZERO && Code != EXCEPTION_ILLEGAL_INSTRUCTION &&
+	   Code != EXCEPTION_PRIV_INSTRUCTION && Code != EXCEPTION_ARRAY_BOUNDS_EXCEEDED)
+		return EXCEPTION_CONTINUE_SEARCH;
+
+	// Handled by the guard of SelectTargetType (see execSafeSelectTargetType)
+	if(GInSafeSelectTargetType)
+		return EXCEPTION_CONTINUE_SEARCH;
+
+	CONTEXT* C = Info->ContextRecord;
+	ANSICHAR Where[300];
+	DescribeAddress(reinterpret_cast<DWORD>(Info->ExceptionRecord->ExceptionAddress), Where, sizeof(Where));
+
+	// Windows itself probes memory with handled exceptions (IsBadReadPtr), these are not crashes
+	if(_strnicmp(Where, "KERNEL32", 8) == 0 || _strnicmp(Where, "KERNELBASE", 10) == 0 || _strnicmp(Where, "ntdll", 5) == 0)
+		return EXCEPTION_CONTINUE_SEARCH;
+
+	if(InterlockedIncrement(&GCoopExceptionLogs) > 5 || !GLog)
+		return EXCEPTION_CONTINUE_SEARCH;
+
+	debugf("ModCoop: Exception 0x%08X at %s (%s 0x%08X) EAX=%08X EBX=%08X ECX=%08X EDX=%08X ESI=%08X EDI=%08X EBP=%08X ESP=%08X",
+	       Code, Where, Info->ExceptionRecord->NumberParameters > 1 && Info->ExceptionRecord->ExceptionInformation[0] ? "writing" : "reading",
+	       Info->ExceptionRecord->NumberParameters > 1 ? Info->ExceptionRecord->ExceptionInformation[1] : 0,
+	       C->Eax, C->Ebx, C->Ecx, C->Edx, C->Esi, C->Edi, C->Ebp, C->Esp);
+	debugf("ModCoop: Last script step: %s", GCoopDebugStep);
+
+	DWORD Returns[24];
+	INT Count = ReadStack(reinterpret_cast<DWORD*>(C->Esp), Returns, ARRAY_COUNT(Returns));
+
+	for(INT i = 0; i < Count; ++i)
+	{
+		DescribeAddress(Returns[i], Where, sizeof(Where));
+		debugf("ModCoop: Stack %i: %s", i, Where);
+	}
+
+	GLog->Flush();
+
+	return EXCEPTION_CONTINUE_SEARCH;
+}
+
+static void InstallCrashLog()
+{
+	static UBOOL Installed = 0;
+
+	if(Installed)
+		return;
+
+	Installed = 1;
+	AddVectoredExceptionHandler(1, CoopExceptionHandler);
+	debugf("ModCoop: Crash diagnostics installed");
+}
+
+void UCoopNative::execSetDebugStep(FFrame& Stack, void* Result)
+{
+	P_GET_STR(Step);
+	P_FINISH;
+
+	appStrncpy(GCoopDebugStep, *Step, ARRAY_COUNT(GCoopDebugStep));
+}
+
+/*
+ * CTPlayer.SelectTargetType (CTGame.dll, what the player looks at) reads Target.SquadMarker after it found that Target is None
+ * (CTGame.dll+0x2A5EA). In single player Target is never None there, network clients crashed with "General protection fault" in
+ * CoopPlayer.PlayerTick (GEO_01C, several times). The native is called through a guard: if it crashes, the target is cleared and the
+ * game goes on.
+ */
+static Native OriginalSelectTargetType = NULL;
+static INT    SelectTargetTypeCrashes = 0;
+
+static INT AccessViolationFilter(DWORD Code)
+{
+	return Code == EXCEPTION_ACCESS_VIOLATION ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH;
+}
+
+static UBOOL CallGuarded(UObject* Self, Native Func, FFrame& Stack, void* Result)
+{
+	__try
+	{
+		(Self->*Func)(Stack, Result);
+		return 1;
+	}
+	__except(AccessViolationFilter(GetExceptionCode()))
+	{
+		return 0;
+	}
+}
+
+// Not a native of the script class: ModCoopClasses.h is regenerated by the script compiler and would lose the declaration
+class UCoopSelectTargetGuard : public UObject
+{
+public:
+	void execSafeSelectTargetType(FFrame& Stack, void* Result);
+};
+
+void UCoopSelectTargetGuard::execSafeSelectTargetType(FFrame& Stack, void* Result)
+{
+	APlayerController* Player = reinterpret_cast<APlayerController*>(this);
+
+	GInSafeSelectTargetType = 1;
+	UBOOL Ok = CallGuarded(this, OriginalSelectTargetType, Stack, Result);
+	GInSafeSelectTargetType = 0;
+
+	if(Ok)
+		return;
+
+	if(SelectTargetTypeCrashes++ < 10)
+		debugf("ModCoop: Caught a crash in CTPlayer.SelectTargetType (Target=%s), clearing the target", Player->Target ? Player->Target->GetName() : "None");
+
+	Player->Target = NULL;
+	*static_cast<BYTE*>(Result) = 0; // TGT_Default
+}
+
+static void InstallSelectTargetTypeGuard()
+{
+	UClass* CTPlayerClass = FindObject<UClass>(ANY_PACKAGE, "CTPlayer");
+	UFunction* Function = CTPlayerClass ? FindField<UFunction>(CTPlayerClass, "SelectTargetType") : NULL;
+
+	if(!Function || !Function->Func)
+	{
+		debugf(NAME_Warning, "ModCoop: CTPlayer.SelectTargetType not found, no guard");
+		return;
+	}
+
+	if(OriginalSelectTargetType)
+		return;
+
+	OriginalSelectTargetType = Function->Func;
+	Function->Func = static_cast<Native>(&UCoopSelectTargetGuard::execSafeSelectTargetType);
+	debugf("ModCoop: Installed the guard of CTPlayer.SelectTargetType");
+}
+
 void UCoopNative::execInstallClientFixes(FFrame& Stack, void* Result)
 {
 	P_FINISH;
+
+	InstallCrashLog();
+	InstallSelectTargetTypeGuard();
 
 	static UBOOL Installed = 0;
 
@@ -634,4 +834,154 @@ void UCoopNative::execInstallClientFixes(FFrame& Stack, void* Result)
 	}
 
 	debugf(NAME_Warning, "ModCoop: CTBot tick slot not found, client fixes disabled");
+}
+
+/*
+ * System information for test reports. The engine's own lines are wrong on current systems (Windows NT 6.2 because of the
+ * compatibility shim, "Unknown processor", the memory capped at 4 GB) and say nothing about the graphics card or the wrappers
+ * many players use (dgVoodoo, DXVK, ReShade as d3d8/d3d9/dxgi.dll next to the exe).
+ */
+static void LogFileInfo(const char* Dir, const char* Name)
+{
+	char Path[MAX_PATH];
+	_snprintf_s(Path, sizeof(Path), _TRUNCATE, "%s\\%s", Dir, Name);
+
+	WIN32_FILE_ATTRIBUTE_DATA Data;
+
+	if(!GetFileAttributesExA(Path, GetFileExInfoStandard, &Data))
+		return;
+
+	char Product[128] = "";
+	DWORD Handle = 0;
+	DWORD Size = GetFileVersionInfoSizeA(Path, &Handle);
+
+	if(Size > 0 && Size < 1024 * 1024)
+	{
+		BYTE* Buffer = new BYTE[Size];
+
+		if(GetFileVersionInfoA(Path, 0, Size, Buffer))
+		{
+			struct LangCodePage { WORD Language; WORD CodePage; }* Translation = NULL;
+			UINT Len = 0;
+
+			if(VerQueryValueA(Buffer, "\\VarFileInfo\\Translation", reinterpret_cast<void**>(&Translation), &Len) && Len >= sizeof(LangCodePage))
+			{
+				char Key[64];
+				char* Value = NULL;
+				UINT ValueLen = 0;
+
+				_snprintf_s(Key, sizeof(Key), _TRUNCATE, "\\StringFileInfo\\%04x%04x\\ProductName", Translation->Language, Translation->CodePage);
+
+				if(VerQueryValueA(Buffer, Key, reinterpret_cast<void**>(&Value), &ValueLen) && Value)
+					_snprintf_s(Product, sizeof(Product), _TRUNCATE, "%s", Value);
+
+				_snprintf_s(Key, sizeof(Key), _TRUNCATE, "\\StringFileInfo\\%04x%04x\\ProductVersion", Translation->Language, Translation->CodePage);
+
+				if(VerQueryValueA(Buffer, Key, reinterpret_cast<void**>(&Value), &ValueLen) && Value)
+				{
+					size_t Used = strlen(Product);
+					_snprintf_s(Product + Used, sizeof(Product) - Used, _TRUNCATE, " %s", Value);
+				}
+			}
+		}
+
+		delete[] Buffer;
+	}
+
+	SYSTEMTIME Time;
+	FileTimeToSystemTime(&Data.ftLastWriteTime, &Time);
+	debugf("ModCoop: System: file %s %u bytes %04u-%02u-%02u %s", Name, Data.nFileSizeLow, Time.wYear, Time.wMonth, Time.wDay, Product);
+}
+
+void UCoopNative::execLogSystemInfo(FFrame& Stack, void* Result)
+{
+	P_FINISH;
+
+	// Windows (RtlGetVersion isn't affected by the compatibility shim)
+	typedef LONG (WINAPI* RtlGetVersionFunc)(OSVERSIONINFOW*);
+	OSVERSIONINFOW Os;
+	appMemzero(&Os, sizeof(Os));
+	Os.dwOSVersionInfoSize = sizeof(Os);
+	RtlGetVersionFunc RtlGetVersion = reinterpret_cast<RtlGetVersionFunc>(GetProcAddress(GetModuleHandleA("ntdll.dll"), "RtlGetVersion"));
+
+	if(RtlGetVersion)
+		RtlGetVersion(&Os);
+
+	debugf("ModCoop: System: Windows %u.%u build %u%s", Os.dwMajorVersion, Os.dwMinorVersion, Os.dwBuildNumber,
+	       GetProcAddress(GetModuleHandleA("ntdll.dll"), "wine_get_version") ? " (Wine/Proton)" : "");
+
+	// Processor
+	char Cpu[128] = "unknown";
+	DWORD CpuSize = sizeof(Cpu);
+	HKEY Key;
+
+	if(RegOpenKeyExA(HKEY_LOCAL_MACHINE, "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0", 0, KEY_READ, &Key) == ERROR_SUCCESS)
+	{
+		RegQueryValueExA(Key, "ProcessorNameString", NULL, NULL, reinterpret_cast<BYTE*>(Cpu), &CpuSize);
+		RegCloseKey(Key);
+	}
+
+	SYSTEM_INFO Info;
+	GetSystemInfo(&Info);
+
+	MEMORYSTATUSEX Memory;
+	Memory.dwLength = sizeof(Memory);
+	GlobalMemoryStatusEx(&Memory);
+
+	debugf("ModCoop: System: CPU %s, %u threads, RAM %u MB", Cpu, Info.dwNumberOfProcessors, static_cast<DWORD>(Memory.ullTotalPhys / (1024 * 1024)));
+
+	// Graphics cards and the desktop
+	DISPLAY_DEVICEA Device;
+
+	for(DWORD i = 0; i < 8; ++i)
+	{
+		appMemzero(&Device, sizeof(Device));
+		Device.cb = sizeof(Device);
+
+		if(!EnumDisplayDevicesA(NULL, i, &Device, 0))
+			break;
+
+		if(Device.StateFlags & DISPLAY_DEVICE_ACTIVE)
+			debugf("ModCoop: System: GPU %s%s", Device.DeviceString, (Device.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE) ? " (primary)" : "");
+	}
+
+	DEVMODEA Mode;
+	appMemzero(&Mode, sizeof(Mode));
+	Mode.dmSize = sizeof(Mode);
+
+	if(EnumDisplaySettingsA(NULL, ENUM_CURRENT_SETTINGS, &Mode))
+		debugf("ModCoop: System: desktop %ux%u %u Hz", Mode.dmPelsWidth, Mode.dmPelsHeight, Mode.dmDisplayFrequency);
+
+	// The game and what's next to it
+	char Exe[MAX_PATH] = "";
+	GetModuleFileNameA(NULL, Exe, MAX_PATH);
+	debugf("ModCoop: System: exe %s", Exe);
+
+	char Dir[MAX_PATH];
+	_snprintf_s(Dir, sizeof(Dir), _TRUNCATE, "%s", Exe);
+	char* Slash = strrchr(Dir, '\\');
+
+	if(Slash)
+		*Slash = 0;
+
+	const char* Exename = Slash ? Slash + 1 : Exe;
+	LogFileInfo(Dir, Exename);
+
+	static const char* Files[] = { "Mod.dll", "ModCoop.dll", "d3d8.dll", "d3d9.dll", "dxgi.dll", "d3d11.dll", "ddraw.dll", "dinput8.dll", "dsound.dll",
+	                               "winmm.dll", "version.dll", "opengl32.dll", "dgVoodoo.conf", "dxvk.conf", "ReShade.ini", "dgVoodooCpl.exe", "OpenAL32.dll" };
+
+	for(INT i = 0; i < ARRAY_COUNT(Files); ++i)
+		LogFileInfo(Dir, Files[i]);
+
+	// Which Direct3D the game really uses
+	static const char* Modules[] = { "d3d8.dll", "d3d9.dll", "dxgi.dll" };
+
+	for(INT i = 0; i < ARRAY_COUNT(Modules); ++i)
+	{
+		HMODULE Module = GetModuleHandleA(Modules[i]);
+		char ModulePath[MAX_PATH];
+
+		if(Module && GetModuleFileNameA(Module, ModulePath, MAX_PATH))
+			debugf("ModCoop: System: loaded %s", ModulePath);
+	}
 }

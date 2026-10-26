@@ -7,7 +7,7 @@ class CoopConfig extends Object config(ModCoop);
  */
 
 // Mod version. Every player must have the same build (the package GUIDs must match), so increase this with every release.
-const MOD_VERSION = "0.59";
+const MOD_VERSION = "0.6";
 
 var string               RecentAddresses[5]; // Most recent first, loaded from RecentAddressList (see LoadLists)
 // Lists are saved as one string in their own section (CoopNative.WriteSavedString): the config writer of RC comments out values
