@@ -8,7 +8,8 @@ class CoopCommando extends PlayerCommando;
  * Pawn used by clients in a coop game. It is a regular player commando but:
  * - it does not trigger the single player events 'PlayerIncapacitated' and 'PlayerRevived' (level scripts only expect the host to do that)
  * - it is not part of the host's squad
- * - it uses a different armor color so players can tell each other apart
+ * - it wears the plain white armor like the host's commando: the colored armors looked like the Delta squad members, who only
+ *   show up as the story brings them (e.g. GEO_05A: the player is alone, GEO_01A: before Scorch joins)
  * - like the host it gets incapacitated instead of dying (bCannotDie) so other players can revive it
  */
 
@@ -68,7 +69,7 @@ function SetCoopSkin(int SkinIndex)
 
 defaultproperties
 {
-	CoopSkins(0)=Shader'CloneTextures.CloneTextures.MP_CloneCommandoA_Shader'
+	CoopSkins(0)=Shader'CloneTextures.CloneTextures.CloneCommandoWhite_Shader'
 	CoopSkins(1)=Shader'CloneTextures.CloneTextures.MP_CloneCommandoB_Shader'
 	CoopSkins(2)=Shader'CloneTextures.CloneTextures.MP_CloneCommandoC_Shader'
 	CoopSkins(3)=Shader'CloneTextures.CloneTextures.MP_CloneCommandoD_Shader'

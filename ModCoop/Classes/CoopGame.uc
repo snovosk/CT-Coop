@@ -25,7 +25,6 @@ var() config float GatherDistance;       // See CheckGather
 var() config float MaxSpawnWait;          // Seconds a client waits for the host to be free (see IsHostFree) before it is spawned anyway
 
 var CoopFixes Fixes;
-var int       NextCoopSkin;
 var bool      bCheckedLevel;
 var float     HostDownTime;       // Level.TimeSeconds when the host's bleed out was delayed, zero if not waiting
 var bool      bAllowHostBleedOut;
@@ -956,11 +955,9 @@ function bool SpawnClient(CoopPlayer CP)
 	SetPlayerDefaults(P);
 	P.AddDefaultInventory();
 
+	// The white armor of the host for every client (see CoopCommando)
 	if(CoopCommando(P).CoopSkin == 0)
-	{
-		NextCoopSkin = NextCoopSkin % 4 + 1;
-		CoopCommando(P).SetCoopSkin(NextCoopSkin);
-	}
+		CoopCommando(P).SetCoopSkin(1);
 
 	CP.IncapacitatedTime = 0;
 	CP.DeadTime = 0;
@@ -5342,6 +5339,38 @@ function StartWatching(CoopPlayer CP, Pawn P, bool bMoveCamera)
 		Broadcast(self, CP.PlayerReplicationInfo.PlayerName $ " joined Delta squad");
 }
 
+// See CheckSquadTakeover: the client of the member (or the closest one without a member) watches its joining scene
+function StartJoinWatch(Pawn P)
+{
+	local Controller C;
+	local CoopPlayer CP, Best;
+
+	Best = CoopPlayer(FindAssignedPlayer(P));
+
+	if(Best == None)
+	{
+		for(C = Level.ControllerList; C != None; C = C.nextController)
+		{
+			CP = CoopPlayer(C);
+
+			if(CP != None && !IsHost(CP) && CoopCommando(CP.Pawn) != None && CP.Pawn.Health > 0 && !CP.Pawn.bIncapacitated &&
+			   CP.WatchedMember == None && GetAssignedClass(CP) == "" && (Best == None || VSize(CP.Pawn.Location - P.Location) < VSize(Best.Pawn.Location - P.Location)))
+				Best = CP;
+		}
+
+		if(Best == None)
+			return;
+
+		SetAssignment(Best, string(P.Class));
+	}
+
+	if(CoopCommando(Best.Pawn) == None || Best.IsInState('CoopWatching') || Best.bIntroWatch || Best.bInBreach || Best.Pawn.Health <= 0 || Best.Pawn.bIncapacitated)
+		return;
+
+	Log("CoopGame: " $ Best.PlayerReplicationInfo.PlayerName $ " watches " $ P $ " join the squad during its script (" $ TestActionString(P) $ ")");
+	StartWatching(Best, P, true);
+}
+
 function CheckSquadTakeover()
 {
 	local PlayerController Host;
@@ -5358,6 +5387,15 @@ function CheckSquadTakeover()
 
 	foreach DynamicActors(class'Pawn', P)
 	{
+		// A member that joins the squad in the middle of an animation of its script (GEO_05B: Sev with the droidekas, a script of
+		// the level adds him): the camera of its client flies to it and watches the rest, the takeover comes when it's over
+		if(P != Host.Pawn && P.IsA('CloneCommando') && P.Squad != None && P.Squad == Host.Pawn.Squad && P.Health > 0 && !P.bIncapacitated &&
+		   P.Controller != None && PlayerController(P.Controller) == None && !P.bHidden && IsScriptBusy(P) && FindWatcher(P) == None)
+		{
+			StartJoinWatch(P);
+			continue;
+		}
+
 		if(!CanBeTakenOver(P, Host.Pawn))
 			continue;
 
@@ -5371,9 +5409,11 @@ function CheckSquadTakeover()
 
 			if(CoopCommando(C.Pawn) != None && C.Pawn.Health > 0 && !C.Pawn.bIncapacitated)
 			{
-				// A member with an entrance still to play (GEO_01C: the rope) is watched first
+				// A member with an entrance still to play (GEO_01C: the rope) is watched first. A client that played the member
+				// before but has its own commando now (GEO_05B: the squad joins again) sees its camera fly to it, unless it already
+				// watches it
 				if(!StartIntroWatch(CoopPlayer(C), P))
-					TakeOver(CoopPlayer(C), P, false);
+					TakeOver(CoopPlayer(C), P, !C.IsInState('CoopWatching'));
 
 				return;
 			}

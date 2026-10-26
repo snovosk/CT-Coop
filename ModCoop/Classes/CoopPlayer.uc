@@ -974,7 +974,7 @@ simulated function LogCommandos()
 		if(P.IsA('CloneCommando') && P.Health > 0)
 		{
 			++Num;
-			Str = Str $ " " $ P.Class.Name $ "(" $ P.Role $ "," $ P.bHidden $ "," $ int(P.Location.X) $ "," $ int(P.Location.Y) $ "," $ int(P.Location.Z) $ ")";
+			Str = Str $ " " $ P.Class.Name $ "(" $ P.Skins[0] $ "," $ P.Role $ "," $ P.bHidden $ "," $ int(P.Location.X) $ "," $ int(P.Location.Y) $ "," $ int(P.Location.Z) $ ")";
 		}
 	}
 
