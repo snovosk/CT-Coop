@@ -88,13 +88,17 @@ var bool        bLiftView;                  // Riding a lift: the camera over th
 var vector      LiftCenter;
 var float       LiftLookYaw, LiftLookPitch; // Looking around from there
 var bool        bLiftViewSent;              // Server: ClientCoopLiftView(true) was sent
+var bool        bHideRiders;                // Client: see ClientCoopHideRiders
+var array<Actor> RideHiddenActors;
+var bool        bHideRidersSent;            // Server: ClientCoopHideRiders(true) was sent
+var bool        bLiftFaced;                 // Server: turned to the middle of the lift (CoopGame.FaceLiftCenter)
 
 replication
 {
 	reliable if(Role == ROLE_Authority)
 		ClientCoopMessage, ClientCoopPawnRevived, ClientCoopSetIncapacitated, ClientCoopSetIdleState, ClientCoopSetPanelState, ClientCoopTakeoverCamera, ClientCoopSetActorCollision;
 	reliable if(Role == ROLE_Authority)
-		ClientCoopDumpProps, ClientCoopObjectiveTracker, ClientCoopBlinkHUD, ClientCoopShakeView, ClientCoopScreenFade, ClientCoopCriticalMessage, ClientCoopSetObjectives, ClientCoopTestLag, ClientCoopTestCommand, ClientCoopProbe, ClientCoopSetWatchFocus, ClientCoopSetCollisionByTag, ClientCoopSetHiddenByTag, ClientCoopSetMarkerState, ClientCoopManTurret, ClientCoopLeaveTurret, ClientCoopScriptAnim, ClientCoopEndScriptAnim, ClientCoopLiftView;
+		ClientCoopDumpProps, ClientCoopObjectiveTracker, ClientCoopBlinkHUD, ClientCoopShakeView, ClientCoopScreenFade, ClientCoopCriticalMessage, ClientCoopSetObjectives, ClientCoopTestLag, ClientCoopTestCommand, ClientCoopProbe, ClientCoopSetWatchFocus, ClientCoopSetCollisionByTag, ClientCoopSetHiddenByTag, ClientCoopSetMarkerState, ClientCoopManTurret, ClientCoopLeaveTurret, ClientCoopScriptAnim, ClientCoopEndScriptAnim, ClientCoopLiftView, ClientCoopHideRiders;
 	unreliable if(Role == ROLE_Authority)
 		ClientCoopSetSquadState, ClientCoopSpawnEffect, ClientCoopSetActorDisplay, ClientCoopSetActorLook, ClientCoopSetPanelLinks, ClientCoopSetPanelProgress, ClientCoopSetLight;
 	reliable if(Role < ROLE_Authority)
@@ -887,6 +891,17 @@ event PlayerTick(float DeltaTime)
 		// Each step is marked for the crash diagnostics of ModCoop.dll (the engine only says "PlayerTick")
 		DebugStep("EnsureClientTeams");
 		EnsureClientTeams();
+		if(bHideRiders)
+			ApplyHideRiders();
+
+		// Spawned while the camera was still on the controller (the level was waiting for the clients): the client saw its own
+		// commando from inside and no weapon (GEO_05A, in the lift)
+		if(Pawn != None && ViewTarget != Pawn && !bBehindView && !IsInState('CoopWatching') && (IsInState('PlayerWalking') || IsInState('CoopLiftRide')))
+		{
+			Log("ModCoop: The camera was on " $ ViewTarget $ ", back to the own commando " $ Pawn);
+			SetViewTarget(Pawn);
+		}
+
 		DebugStep("FixStuckWeapon");
 		FixStuckWeapon();
 		FixStuckFire(DeltaTime);
@@ -1453,9 +1468,12 @@ simulated function CalcWatchView(out actor ViewActor, out vector CameraLocation,
 
 	P = Pawn(ViewTarget);
 
-	// Riding a lift with the own pawn: the same camera on it
+	// Riding a lift with the own pawn: the same camera on it (behind view again after a respawn or a takeover reset it)
 	if(bLiftView && !IsInState('CoopWatching'))
+	{
 		P = Pawn;
+		bBehindView = true;
+	}
 
 	// The member may still be this client's pawn here (a door breach: the AI has it, the client doesn't know yet)
 	// Not P.Health: on a client the health of a member may not have arrived yet (0) while the level waits for the clients
@@ -2019,6 +2037,55 @@ simulated function AddLiftLook(float DeltaTime)
 {
 	LiftLookYaw += 32 * DeltaTime * aTurn;
 	LiftLookPitch = FClamp(LiftLookPitch + 32 * DeltaTime * aLookUp, -6000, 6000);
+}
+
+// See CoopGame.HideRiders: only the own commando is drawn while riding a lift (the others stand on the same spot)
+simulated function ClientCoopHideRiders(bool bHide)
+{
+	local Pawn P;
+
+	Log("ModCoop: Hide riders " $ bHide $ " NetMode=" $ Level.NetMode);
+
+	if(Level.NetMode != NM_Client)
+		return;
+
+	bHideRiders = bHide;
+	ApplyHideRiders();
+
+	foreach DynamicActors(class'Pawn', P)
+	{
+		if(P.IsA('CloneCommando'))
+			Log("ModCoop: Riders hidden " $ bHide $ ": " $ P $ " (" $ P.Class.Name $ ") PRI=" $ P.PlayerReplicationInfo $ " Hidden=" $ P.bHidden $ " Own=" $ (P == Pawn));
+	}
+}
+
+simulated function ApplyHideRiders()
+{
+	local Pawn P;
+	local bool bHideThis;
+
+	foreach DynamicActors(class'Pawn', P)
+	{
+		if(P.PlayerReplicationInfo == None && P != Pawn)
+			continue;
+
+		bHideThis = bHideRiders && P != Pawn;
+
+		if(bHideThis)
+			class'CoopGame'.static.HidePawnParts(P, RideHiddenActors);
+		else if(P == Pawn)
+		{
+			// The server hides the clients' commandos, this client's own one stays visible here
+			if(P.bHidden)
+				P.bHidden = false;
+
+			if(P.Weapon != None && P.Weapon.ThirdPersonActor != None && P.Weapon.ThirdPersonActor.bHidden)
+				P.Weapon.ThirdPersonActor.bHidden = false;
+		}
+	}
+
+	if(!bHideRiders)
+		class'CoopGame'.static.ShowHiddenParts(RideHiddenActors);
 }
 
 // See CoopGame.CheckLiftRides: the camera over the shoulder looking at the center of the lift car

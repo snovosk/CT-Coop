@@ -110,6 +110,10 @@ var array<Pawn>        ArrivalScanned;
 var float              ArrivalRadius;
 var Turret             TestTurret;
 var int                TestSubStep;
+var Mover              LastRideLift;        // See HostLift
+var float              LastRideMoveTime, LastRideSeenTime;
+var bool               bRidersHidden;       // See HideRiders
+var array<Actor>       RideHiddenActors;
 var array<string>      SceneMaps;           // See InStartScene
 var array<name>        SceneEndEvents;
 var name               SceneEndEvent;
@@ -487,12 +491,22 @@ function Mover HostLift(PlayerController Host, optional bool bEvenStopped)
 	local Mover M;
 	local int i;
 
-	if(Host == None || Host.Pawn == None || Host.Pawn.Health <= 0 || Host.Pawn.Physics != PHYS_Walking)
+	// Standing on the car is enough: the host falls for a moment when the lift starts (the lift view went off right away)
+	if(Host == None || Host.Pawn == None || Host.Pawn.Health <= 0 || (Host.Pawn.Physics != PHYS_Walking && Mover(Host.Pawn.Base) == None))
 		return None;
 
 	M = Mover(Host.Pawn.Base);
 
-	if(M == None || (!M.bInterpolating && !bEvenStopped))
+	if(M == None)
+		return None;
+
+	// GEO_05A: the lift stops for a moment between its keyframes, that isn't the end of the ride
+	if(M.bInterpolating)
+	{
+		LastRideLift = M;
+		LastRideMoveTime = Level.TimeSeconds;
+	}
+	else if(!bEvenStopped && !(M == LastRideLift && Level.TimeSeconds - LastRideMoveTime < 2.5))
 		return None;
 
 	for(i = 0; i < 4; i = i + 1)
@@ -581,6 +595,111 @@ function bool InStartScene()
 	return true;
 }
 
+/*
+ * Riding a lift together (CheckLiftRides): the players' commandos stand on the same spot, so they don't block each other and every
+ * computer only draws its own player's commando. The server hides the clients' commandos (replicated), each client shows its own
+ * again and hides the host's (CoopPlayer.ClientCoopHideRiders).
+ */
+function HideRiders(bool bHide)
+{
+	local Controller C;
+	local Pawn P;
+	local vector Spot;
+
+	if(bHide == bRidersHidden)
+		return;
+
+	bRidersHidden = bHide;
+	Log("CoopGame: players on the lift hidden from each other: " $ bHide);
+
+	if(!bHide)
+		ShowHiddenParts(RideHiddenActors);
+
+	for(C = Level.ControllerList; C != None; C = C.nextController)
+	{
+		if(CoopPlayer(C) == None || C.Pawn == None)
+			continue;
+
+		P = C.Pawn;
+
+		if(!IsHost(C) && bHide)
+			HidePawnParts(P, RideHiddenActors);
+
+		// Off the shared spot before they block each other again
+		if(!bHide && !IsHost(C) && GetHost() != None && GetHost().Pawn != None && VSize(P.Location - GetHost().Pawn.Location) < 100)
+		{
+			if((LastRideLift != None && FindLiftSpot(GetHost().Pawn, LastRideLift, Spot)) || FindSpawnLocation(GetHost().Pawn.Location, GetHost().Pawn.Rotation, Spot))
+			{
+				P.SetLocation(Spot);
+				C.ClientSetLocation(Spot, C.Rotation);
+			}
+		}
+
+		if(bHide)
+			P.SetCollision(P.bCollideActors, false, false);
+		else
+			P.SetCollision(P.bCollideActors, P.default.bBlockActors, P.default.bBlockPlayers);
+
+		if(!IsHost(C))
+		{
+			Log("CoopGame: hiding riders " $ bHide $ " for " $ C.PlayerReplicationInfo.PlayerName);
+			CoopPlayer(C).bHideRidersSent = bHide;
+			CoopPlayer(C).ClientCoopHideRiders(bHide);
+		}
+	}
+}
+
+function FaceLiftCenter(CoopPlayer CP, vector Center)
+{
+	local rotator R;
+
+	if(CP.Pawn == None || VSize(Center - CP.Pawn.Location) < 30)
+		return;
+
+	R = rotator(Center - CP.Pawn.Location);
+	R.Pitch = 0;
+	R.Roll = 0;
+	CP.SetRotation(R);
+	CP.ClientSetRotation(R);
+}
+
+// The commando and everything attached to it (third person weapon, headlamp, gear): parts of it were still seen on some frames.
+// What gets hidden is remembered in List, only that is shown again (some attached actors are always hidden).
+static function HidePawnParts(Pawn P, out array<Actor> List)
+{
+	local int i;
+
+	HideForRide(P, List);
+
+	if(P.Weapon != None)
+		HideForRide(P.Weapon.ThirdPersonActor, List);
+
+	for(i = 0; i < P.Attached.Length; i = i + 1)
+		HideForRide(P.Attached[i], List);
+}
+
+static function HideForRide(Actor A, out array<Actor> List)
+{
+	if(A == None || A.bHidden)
+		return;
+
+	A.bHidden = true;
+	List[List.Length] = A;
+}
+
+static function ShowHiddenParts(out array<Actor> List)
+{
+	local int i;
+
+	for(i = 0; i < List.Length; i = i + 1)
+	{
+		if(List[i] != None && !List[i].bDeleteMe)
+			List[i].bHidden = false;
+	}
+
+	List.Length = 0;
+}
+
 // The middle of the players and squad members on the lift car (the car's origin is often at an edge)
 function vector LiftCenter(Mover M)
 {
@@ -614,7 +733,20 @@ function CheckLiftRides()
 
 	Host = GetHost();
 	M = HostLift(Host);
+
+	// Short gaps (the host in the air for a moment, a stop at a keyframe) don't end the ride
+	if(M != None)
+		LastRideSeenTime = Level.TimeSeconds;
+	else if(LastRideLift != None && Level.TimeSeconds - LastRideSeenTime < 2.5 && Host != None && Host.Pawn != None && VSize(Host.Pawn.Location - LastRideLift.Location) < 2000)
+		M = LastRideLift;
+
 	bScene = M == None && InStartScene();
+
+	if(M == None && bRidersHidden)
+	{
+		Log("CoopGame: the ride is over: host on " $ Host.Pawn.Base $ " physics " $ Host.Pawn.Physics $ " lift " $ LastRideLift $ " moving " $ LastRideLift.bInterpolating $ " " $ (Level.TimeSeconds - LastRideMoveTime) $ " s ago");
+		HideRiders(false);
+	}
 
 	if(M != None)
 		Center = LiftCenter(M);
@@ -628,8 +760,17 @@ function CheckLiftRides()
 		if(CP == None)
 			continue;
 
-		// Everybody's camera over the shoulder looks at the center of the car (also a client watching its member's scene there)
-		if((M != None || bScene) && (CP.Pawn != None || (CP.WatchedMember != None && (bScene || CP.WatchedMember.Base == M))))
+		// Lift: first person, turned to the middle of the car once (FaceLiftCenter); a start scene: everybody's camera over the
+		// shoulder looks at the middle of the squad (also a client watching its member's scene there)
+		if(M != None && CP.Pawn != None && !CP.bLiftFaced)
+		{
+			CP.bLiftFaced = true;
+			FaceLiftCenter(CP, Center);
+		}
+		else if(M == None)
+			CP.bLiftFaced = false;
+
+		if(bScene && (CP.Pawn != None || CP.WatchedMember != None))
 		{
 			if(!CP.bLiftViewSent)
 				Log("CoopGame: " $ CP.PlayerReplicationInfo.PlayerName $ " gets the lift view of " $ M $ ", center " $ Center);
@@ -673,13 +814,30 @@ function CheckLiftRides()
 			continue;
 		}
 
-		if(M != None && CP.Pawn.Base != M && (CP.Pawn.Physics == PHYS_Walking || VSize(CP.Pawn.Location - Host.Pawn.Location) > 600) &&
-		   FindLiftSpot(Host.Pawn, M, Spot))
+		// The car is small: everybody stands where the host stands, the players don't block each other and each one only sees their
+		// own commando (HideRiders); next to the host the clients were put into the walls of the shaft
+		if(M != None && (CP.Pawn.Base != M || VSize(CP.Pawn.Location - Host.Pawn.Location) > 60))
 		{
-			Log("CoopGame: " $ CP.PlayerReplicationInfo.PlayerName $ " is put on the lift " $ M $ " of the host (was on " $ CP.Pawn.Base $ " at " $ CP.Pawn.Location $ ")");
+			if(!bRidersHidden)
+				HideRiders(true);
+
+			Spot = Host.Pawn.Location;
+			Log("CoopGame: " $ CP.PlayerReplicationInfo.PlayerName $ " is put on the lift " $ M $ " at the host (was on " $ CP.Pawn.Base $ " at " $ CP.Pawn.Location $ ")");
+			CP.Pawn.SetCollision(CP.Pawn.bCollideActors, false, false);
 			CP.Pawn.SetLocation(Spot);
 			CP.Pawn.Velocity = Host.Pawn.Velocity;
 			CP.ClientSetLocation(Spot, CP.Rotation);
+		}
+
+		// A client that came later (spawned in the car): hidden and told like the others
+		if(bRidersHidden && !CP.bHideRidersSent)
+		{
+			CP.bHideRidersSent = true;
+			Log("CoopGame: hiding riders for " $ CP.PlayerReplicationInfo.PlayerName $ " (came later)");
+			HidePawnParts(CP.Pawn, RideHiddenActors);
+
+			CP.Pawn.SetCollision(CP.Pawn.bCollideActors, false, false);
+			CP.ClientCoopHideRiders(true);
 		}
 
 		if(!CP.IsInState('CoopLiftRide'))
