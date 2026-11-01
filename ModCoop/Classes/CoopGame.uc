@@ -24,6 +24,7 @@ var() config bool  bClientsTakeOverSquad; // Clients take over squad members (se
 var() config float GatherDistance;       // See CheckGather
 var() config float MaxSpawnWait;          // Seconds a client waits for the host to be free (see IsHostFree) before it is spawned anyway
 
+const MAP_ACTORS_PER_SECOND = 40;
 var CoopFixes Fixes;
 var bool      bCheckedLevel;
 var float     HostDownTime;       // Level.TimeSeconds when the host's bleed out was delayed, zero if not waiting
@@ -41,6 +42,8 @@ var string    TestOptions;
 var SquadMarker TestMarker;
 var bool    bTestResSet;
 var string  TestEvents;
+var string  TestCauses;
+var float   NextTestCause;
 var float   NextTestEvent;
 var int     TestChainStage;
 var vector  TestHostLocation;
@@ -160,13 +163,18 @@ var array<SquadMarker> ClientSnipeMarkers; // See CheckClientSnipers: 1 entry pe
 var array<byte>        ClientSnipeStates;  // 1 = the client was asked to take the position, 2 = in position
 var float              NextSnipeTrackerTime;
 var bool  bWaitingForClients;    // See WaitForClients
+var CoopSevIntro SevIntro;         // See CoopSevIntro
 var CoopEndLift EndLift;           // See CoopEndLift
+var CoopLobby Lobby;               // Only on the map of the lobby, see CoopLobby
 var string EndLiftMap;
 var float ClientsReadyTime;        // See CheckClientWaitTime
 var array<name>      HiddenTags;         // See ForwardSetHidden
 var array<byte>      HiddenTagValues;
 var array<name>      MarkerStateTags;    // See ForwardMarkerState
 var array<Pawn>      ScriptAnimPawns;    // See ForwardScriptAnim
+var array<name>      ScriptAnimNames;
+var array<float>     ScriptAnimRates;
+var array<byte>      ScriptAnimLoops;
 var float            NextScriptAnimCheck;
 var array<name>      MarkerStates;
 var array<name>      CollisionTags;      // See ForwardSetCollision
@@ -212,9 +220,24 @@ event InitGame(string Options, out string Error)
 	class'CoopNative'.static.SetNetTimeouts(class'CoopConfig'.default.ServerTimeout, class'CoopConfig'.default.ServerTimeout);
 	class'CoopNative'.static.SetNetRates(class'CoopConfig'.default.NetClientRate, class'CoopConfig'.default.NetTickRate);
 
+	// The options stay in the URL of the next levels, the map tells it
+	if(Left(Caps(string(Level)), 8) == "MPCUSTOM")
+	{
+		Lobby = new class'CoopLobby';
+		Lobby.Setup(self, ParseOption(Options, "CoopLobbyLevel"));
+
+		// Steam friends find this game through the relay. Without Steam the relay just ends.
+		class'CoopNative'.static.StartRelay("host");
+	}
+
+	SevIntro = new class'CoopSevIntro';
+	SevIntro.Setup(self);
+
 	TestAction = ParseOption(Options, "CoopTest");
 	TestOptions = Options;
 	TestEvents = ParseOption(Options, "CoopTestEvent");
+	TestCauses = ParseOption(Options, "CoopTestCause");
+	NextTestCause = float(ParseOption(Options, "CoopTestCauseEvery"));
 	bTestPanelHost = ParseOption(Options, "CoopTestHost") != "";
 	TestPanelType = 7; // ActivateItem.AIT_BactaDispenser
 
@@ -356,6 +379,11 @@ event PostLogin(PlayerController NewPlayer)
 	// Otherwise a second game instance on the same PC is rejected because of the duplicate CD key
 	class'CoopNative'.static.ReleaseAllCDKeys();
 
+	MakeNameUnique(NewPlayer);
+
+	if(Lobby != None && CoopPlayer(NewPlayer) != None)
+		Lobby.PlayerJoined(CoopPlayer(NewPlayer));
+
 	if(IsHost(NewPlayer))
 		WaitForClients(NewPlayer);
 	else if(bWaitingForClients)
@@ -474,6 +502,42 @@ function PlayerController GetHost()
  * Pawn.PlayBreathe) put ActionBreathe on it: it stood behind the turret as if running (session 2026-11-01). Single player never shows
  * the player's gunner. The pose is kept on the server, the other players get it with the pawn's animation.
  */
+/*
+ * Bots that walk without anything to look at keep Focus on their own pawn. In single player they still turn into the direction they
+ * walk, in a network game the rotation stays as it was until they stop: they walked sideways and backwards (GEO_04D: 9 of 10 samples
+ * within 30 degrees standalone, 0 of 14 as a listen server, same level and test `facing`). Which native code differs isn't known.
+ * Bots looking at something (an enemy) strafe as they should, scripts decide their own turning.
+ */
+function TurnBotsToMove(float DeltaTime)
+{
+	local Controller C;
+	local Pawn P;
+	local rotator R;
+	local int Delta;
+	local float MaxTurn;
+
+	if(Level.NetMode == NM_Standalone)
+		return;
+
+	for(C = Level.ControllerList; C != None; C = C.nextController)
+	{
+		P = C.Pawn;
+
+		if(P == None || P != C.Focus || !C.IsA('CTBot') || P.Physics != PHYS_Walking || VSize(P.Velocity) < 60 || P.IsA('Turret'))
+			continue;
+
+		R = P.Rotation;
+		Delta = (rotator(P.Velocity).Yaw - R.Yaw) & 65535;
+
+		if(Delta > 32768)
+			Delta -= 65536;
+
+		MaxTurn = P.RotationRate.Yaw * DeltaTime;
+		R.Yaw += FClamp(Delta, -MaxTurn, MaxTurn);
+		P.SetRotation(R);
+	}
+}
+
 function KeepGunnerPoses()
 {
 	local Controller C;
@@ -577,6 +641,10 @@ function ReleaseTurretOfDeadGunner(CoopPlayer CP)
 function RestartPlayer(Controller aPlayer)
 {
 	local CoopPlayer CP;
+
+	// Nobody plays in the lobby, its menu is closed when a player gets a pawn
+	if(Lobby != None)
+		return;
 
 	CP = CoopPlayer(aPlayer);
 
@@ -1076,6 +1144,14 @@ function bool SpawnClient(CoopPlayer CP)
 	// A client that plays a squad member starts as it (e.g. the next level)
 	P = FindAssignedMember(CP);
 
+	// A member picked in the lobby that joins in a scene later in this level (GEO_01B: Fixer is in the squad until his script starts): the
+	// client plays its own commando until then, and the camera flies from it to the member (CheckSceneWatch)
+	if(P != None && JoinsLater(P) && !SevIntro.IsSev(P))
+	{
+		Log("CoopGame: " $ CP.PlayerReplicationInfo.PlayerName $ " starts with a temporary commando, " $ P $ " joins later");
+		P = None;
+	}
+
 	if(P != None)
 	{
 		// A member that still has its entrance to play (GEO_01C: down the rope): the client watches it first (CheckIntroWatch)
@@ -1093,6 +1169,9 @@ function bool SpawnClient(CoopPlayer CP)
 	// The squad member is in the level but not free yet (e.g. a script at the start of the level): wait for it a while
 	// instead of showing the client its own commando for a moment
 	P = FindAssignedMemberInLevel(CP);
+
+	if(P != None && JoinsLater(P) && !SevIntro.IsSev(P))
+		P = None;
 
 	if(P != None)
 	{
@@ -1200,6 +1279,8 @@ function Timer()
 	LogClientsStatus();
 	CheckMissedEvents();
 	CheckClientArrivals();
+	if(Lobby != None)
+		Lobby.Refresh();
 	if(EndLift != None)
 		EndLift.Check();
 	CheckServerStuckFire();
@@ -1216,6 +1297,8 @@ function Timer()
 
 	if(HostDownTime != 0)
 		CheckHostDown();
+
+	CheckTestCauses();
 
 	if(TestAction != "")
 		TickTest();
@@ -1326,6 +1409,7 @@ function SyncIncapacitated()
  */
 event Tick(float DeltaTime)
 {
+	TurnBotsToMove(DeltaTime);
 	Super.Tick(DeltaTime);
 
 	if(!bRemovedUplink && UplinkChecks < 300)
@@ -2347,7 +2431,7 @@ function bool NeedsLookSync(Actor A)
 }
 
 /*
- * Called every second: sends the display, look and panel links of SyncedMapActors to the client, 10 actors a second, starting 3 s
+ * Called every second: sends the display, look and panel links of SyncedMapActors to the client, 40 actors a second (10 showed the GEO_01C window late), starting 0.5 s
  * after it has a pawn. Reliable with the actor's index: a client that doesn't have the actor yet asks for it again
  * (ServerCoopMapActorMissing, up to 10 times). The unreliable passes of 0.61 were lost while the level started (the window of
  * GEO_01C, the bunker of GEO_01A and the base of the GEO_03A shield stayed wrong on the clients, session 2026-10-31).
@@ -2361,17 +2445,17 @@ function SendMapActorDisplay(CoopPlayer CP)
 
 	if(CP.DisplaySyncStart == 0)
 	{
-		CP.DisplaySyncStart = Level.TimeSeconds + 3;
+		CP.DisplaySyncStart = Level.TimeSeconds + 0.5;
 		return;
 	}
 
 	if(Level.TimeSeconds < CP.DisplaySyncStart)
 		return;
 
-	for(n = 0; n < 10 && CP.DisplaySyncIndex < SyncedMapActors.Length; ++n)
+	for(n = 0; n < MAP_ACTORS_PER_SECOND && CP.DisplaySyncIndex < SyncedMapActors.Length; ++n)
 		SendMapActorTo(CP, CP.DisplaySyncIndex++);
 
-	while(n < 10 && CP.DisplayResend.Length > 0)
+	while(n < MAP_ACTORS_PER_SECOND && CP.DisplayResend.Length > 0)
 	{
 		i = CP.DisplayResend[0];
 		CP.DisplayResend.Remove(0, 1);
@@ -2670,6 +2754,7 @@ function TickTest()
 	local ScriptedSequence SS;
 	local Counter Cnt;
 	local Pickup Pick;
+	local PathNode FacingNode;
 	local Turret Tur;
 	local Inventory Inv;
 	local string Str, Str2;
@@ -4047,6 +4132,114 @@ function TickTest()
 			return;
 		}
 	}
+	else if(TestAction ~= "lobby")
+	{
+		// CoopTestLobbyClients clients pick members 1, 2, 3 in the lobby, everybody gets ready, then the test rope on the level
+		if(Lobby == None)
+		{
+			TestAction = "rope";
+			TestStep = 0;
+			TestTime = Level.TimeSeconds + 0.1;
+			return;
+		}
+
+		if(CountClients() < int(ParseOption(TestOptions, "CoopTestLobbyClients")))
+		{
+			TestTime = Level.TimeSeconds + 1;
+			return;
+		}
+
+		i = 0;
+
+		for(C = Level.ControllerList; C != None; C = C.nextController)
+		{
+			if(CoopPlayer(C) == None)
+				continue;
+
+			if(TestStep == 3 && !IsHost(C))
+				CoopPlayer(C).ServerCoopLobbyChoose(++i);
+
+			// A member that is taken is refused
+			if(TestStep == 5 && !IsHost(C) && i == 0)
+			{
+				++i;
+				CoopPlayer(C).ServerCoopLobbyChoose(2);
+			}
+
+			if(TestStep == 7 && IsHost(C))
+				CoopPlayer(C).ServerCoopLobbyLevel(ParseOption(TestOptions, "CoopTestLobbyMap"));
+
+			if(TestStep == 12)
+				CoopPlayer(C).ServerCoopLobbyReady(true);
+		}
+
+		Log("CoopTest: lobby: " $ TestStep $ " " $ Lobby.StateString());
+		TestTime = Level.TimeSeconds + 1;
+		++TestStep;
+		return;
+	}
+	else if(TestAction ~= "rope")
+	{
+		// The entrance on a rope: every 0.5 s the commandos and ropes on the server and the client
+		if(TestStep == 0)
+		{
+			for(C = Level.ControllerList; C != None; C = C.nextController)
+			{
+				if(CoopPlayer(C) != None && !IsHost(C))
+					CoopPlayer(C).ClientCoopTestCommand("NetJump");
+			}
+
+			foreach DynamicActors(class'Pawn', P)
+				Log("CoopTest: jump: server freq " $ P.Class.Name $ " " $ P.NetUpdateFrequency $ " prio " $ P.NetPriority $ " always " $ P.bAlwaysRelevant);
+		}
+
+		for(C = Level.ControllerList; C != None; C = C.nextController)
+		{
+			if(CoopPlayer(C) != None && !IsHost(C))
+				CoopPlayer(C).ClientCoopTestCommand("RopeLog");
+		}
+
+		Log("CoopTest: rope: server " $ TestStep $ " " $ class'CoopPlayer'.static.RopeLines(self));
+		TestTime = Level.TimeSeconds + 0.5;
+		++TestStep;
+		return;
+	}
+	else if(TestAction ~= "facing")
+	{
+		// The host walks away every 8 s, the squad follows. Every 0.5 s where the pawns look and where they go, on server and client
+		for(C = Level.ControllerList; C != None; C = C.nextController)
+		{
+			if(CoopPlayer(C) != None && !IsHost(C) && C.Pawn != None)
+				break;
+		}
+
+		if(TestStep % 16 == 0)
+		{
+			foreach AllActors(class'PathNode', FacingNode)
+			{
+				if(VSize(FacingNode.Location - Host.Pawn.Location) > 700 && VSize(FacingNode.Location - Host.Pawn.Location) < 1500)
+				{
+					Host.Pawn.SetLocation(FacingNode.Location + vect(0,0,40));
+					C.Pawn.SetLocation(FacingNode.Location + vect(60,0,40));
+					C.ClientSetLocation(C.Pawn.Location, C.Pawn.Rotation);
+					Log("CoopTest: facing: host to " $ FacingNode);
+					break;
+				}
+			}
+		}
+
+		foreach DynamicActors(class'Pawn', P)
+		{
+			if(P.Controller != None && PlayerController(P.Controller) == None && P.Health > 0 && !P.IsA('Turret'))
+				Log("CoopTest: facing: server " $ class'CoopPlayer'.static.FacingLine(P) $ " focus=" $ P.Controller.Focus $ " enemy=" $ P.Controller.Enemy $ " state=" $ P.Controller.GetStateName());
+		}
+
+		CoopPlayer(C).ClientCoopTestCommand("FacingLog");
+		Log("CoopTest: facing: step " $ TestStep);
+		TestTime = Level.TimeSeconds + 0.25;
+		++TestStep;
+		return;
+	}
 	else if(TestAction ~= "endlift")
 	{
 		// The end lift: the host steps on it, the first client later (CoopTestLater=<seconds>), the squad members stay where they are
@@ -4658,6 +4851,17 @@ function bool StartIntroWatch(CoopPlayer CP, Pawn P)
 
 	SC = ScriptedController(P.Controller);
 
+	// The script reaches the scene only after waiting for events, the search below stops at those
+	if(SevIntro.IsSev(P))
+	{
+		Log("CoopGame: " $ CP.PlayerReplicationInfo.PlayerName $ " watches " $ P $ " until its scene ends");
+		CP.bIntroWatch = true;
+		CP.IntroWaitIndex = SC.ActionNum;
+		CP.IntroWatchStart = Level.TimeSeconds;
+		StartWatching(CP, P, false);
+		return true;
+	}
+
 	// The scene in the lift the level starts in (GEO_03A: the briefing in the elevator, the squad's talk animations and Scorch's
 	// holo projector are their scripts): the client watches its member until the lift arrived (see CheckIntroWatch)
 	if(InStartScene())
@@ -4730,6 +4934,10 @@ function CheckIntroWatch()
 			RestartPlayer(CP);
 			continue;
 		}
+
+		// Everybody gets the control when Sev's scene is over
+		if(SevIntro.IsRunning())
+			continue;
 
 		SC = ScriptedController(P.Controller);
 		Reason = "";
@@ -4959,11 +5167,24 @@ function ForwardSetHidden(name ActorTag, bool bHidden)
  */
 function ForwardScriptAnim(Pawn P, name Anim, float Rate, bool bLoop)
 {
+	if(P != None && PlayerController(P.Controller) == None)
+		SendScriptAnim(P, Anim, Rate, bLoop);
+}
+
+/*
+ * ACTION_PlayPropAnim on a pawn (the host on the rope: GEO_01A, GEO_01C, GEO_03C, GEO_04A, GEO_04B): replicated like the above, on the
+ * clients the host slid down the rope in its idle pose. It isn't the script's controller that holds this animation, it lasts as long as it plays.
+ */
+function ForwardPropAnim(Pawn P, name Anim, float Rate)
+{
+	if(P != None && (CoopPlayer(P.Controller) == None || IsHost(P.Controller)))
+		SendScriptAnim(P, Anim, Rate, false);
+}
+
+function SendScriptAnim(Pawn P, name Anim, float Rate, bool bLoop)
+{
 	local Controller C;
 	local int i;
-
-	if(P == None || PlayerController(P.Controller) != None)
-		return;
 
 	for(i = 0; i < ScriptAnimPawns.Length; i = i + 1)
 	{
@@ -4972,6 +5193,9 @@ function ForwardScriptAnim(Pawn P, name Anim, float Rate, bool bLoop)
 	}
 
 	ScriptAnimPawns[i] = P;
+	ScriptAnimNames[i] = Anim;
+	ScriptAnimRates[i] = Rate;
+	ScriptAnimLoops[i] = byte(bLoop);
 
 	for(C = Level.ControllerList; C != None; C = C.nextController)
 	{
@@ -4980,25 +5204,130 @@ function ForwardScriptAnim(Pawn P, name Anim, float Rate, bool bLoop)
 	}
 }
 
+function bool ScriptAnimStillPlays(Pawn P, name Anim)
+{
+	local name Seq;
+	local float Frame;
+
+	if(P == None || P.bDeleteMe)
+		return false;
+
+	if(P.Controller != None && PlayerController(P.Controller) == None && P.Controller.bControlAnimations)
+		return true;
+
+	P.GetAnimParams('', Seq, Frame);
+
+	return Seq == Anim && P.IsAnimating();
+}
+
+/*
+ * The entrance on a rope is over when the commando stands on the ground, at 90 % of the animation (GEO_04A, GEO_01C): the level's script
+ * keeps the host in its briefing state for 4 s more and clients get their members later still, when the member has walked off.
+ * Here every player gets the control at once: the client its member, the host its movement (the script's end of the briefing
+ * comes later and changes nothing then).
+ */
+function bool IsOnRope(Pawn P, out float Frame)
+{
+	local name Seq;
+
+	P.GetAnimParams('', Seq, Frame);
+
+	return Left(Caps(string(Seq)), 12) == "ENTRANCEROPE";
+}
+
+function CheckRopeLandings()
+{
+	local Controller C;
+	local CoopPlayer CP;
+	local Pawn P;
+	local float Frame;
+	local bool bOnRope, bHeld;
+
+	// While Sev's scene plays everybody stays where they landed and looks at him
+	SevIntro.Check();
+	bHeld = SevIntro.IsRunning();
+
+	for(C = Level.ControllerList; C != None; C = C.nextController)
+	{
+		CP = CoopPlayer(C);
+
+		if(CP == None)
+			continue;
+
+		if(IsHost(CP))
+		{
+			P = CP.Pawn;
+
+			if(!bHeld && P != None && CP.IsInState('Briefing') && !CP.bLiftView && IsOnRope(P, Frame) && Frame >= 0.9)
+			{
+				Log("CoopGame: the host landed, ending its briefing");
+				CP.GotoState('PlayerWalking');
+				P.ChangeAnimation();
+			}
+
+			continue;
+		}
+
+		P = CP.WatchedMember;
+
+		if(P == None || P.bDeleteMe || P.Health <= 0)
+		{
+			CP.bWatchedOnRope = false;
+			continue;
+		}
+
+		bOnRope = IsOnRope(P, Frame);
+
+		if(bOnRope && Frame < 0.9)
+			CP.bWatchedOnRope = true;
+		else if(CP.bWatchedOnRope && !bHeld)
+		{
+			Log("CoopGame: " $ CP.PlayerReplicationInfo.PlayerName $ " gets " $ P $ ", it landed");
+			CP.bWatchedOnRope = false;
+			CP.bIntroWatch = false;
+			TakeOver(CP, P, false);
+		}
+	}
+}
+
 function CheckScriptAnims()
 {
 	local Controller C;
 	local Pawn P;
 	local int i;
+	local name Seq;
+	local float Frame;
 
 	if(Level.TimeSeconds < NextScriptAnimCheck)
 		return;
 
 	NextScriptAnimCheck = Level.TimeSeconds + 0.2;
 
+	CheckRopeLandings();
+
 	for(i = ScriptAnimPawns.Length - 1; i >= 0; i = i - 1)
 	{
 		P = ScriptAnimPawns[i];
 
-		if(P != None && !P.bDeleteMe && P.Controller != None && PlayerController(P.Controller) == None && P.Controller.bControlAnimations)
+		if(ScriptAnimStillPlays(P, ScriptAnimNames[i]))
+		{
+			// An animation that starts with the level comes before its pawn is on the clients (nothing but the controllers is
+			// replicated while the level waits for them): GEO_04A, the squad on the ropes. Until they have it
+			P.GetAnimParams('', Seq, Frame);
+
+			for(C = Level.ControllerList; C != None; C = C.nextController)
+			{
+				if(CoopPlayer(C) != None && !IsHost(C))
+					CoopPlayer(C).ClientCoopKeepScriptAnim(P, ScriptAnimNames[i], ScriptAnimRates[i], ScriptAnimLoops[i] != 0, Frame);
+			}
+
 			continue;
+		}
 
 		ScriptAnimPawns.Remove(i, 1);
+		ScriptAnimNames.Remove(i, 1);
+		ScriptAnimRates.Remove(i, 1);
+		ScriptAnimLoops.Remove(i, 1);
 
 		if(P == None || P.bDeleteMe)
 			continue;
@@ -6320,6 +6649,62 @@ function CheckSceneWatch()
 	}
 }
 
+// Test: ?CoopTestCause=<event>,<event>... triggers the events of a scene, one every CoopTestCauseEvery seconds, the first after that time
+function CheckTestCauses()
+{
+	local string Event;
+	local Actor A;
+	local int i;
+
+	if(TestCauses == "" || LevelStartTime <= 0 || Level.TimeSeconds - LevelStartTime < NextTestCause)
+		return;
+
+	NextTestCause += float(ParseOption(TestOptions, "CoopTestCauseEvery"));
+	i = InStr(TestCauses, ",");
+
+	if(i == -1)
+	{
+		Event = TestCauses;
+		TestCauses = "";
+	}
+	else
+	{
+		Event = Left(TestCauses, i);
+		TestCauses = Mid(TestCauses, i + 1);
+	}
+
+	Log("CoopTest: cause " $ Event);
+	foreach AllActors(class'Actor', A)
+	{
+		if(string(A.Tag) ~= Event)
+			A.Trigger(self, GetHost().Pawn);
+	}
+}
+
+// See SpawnClient: the script of the member still has to add it to the squad
+function bool JoinsLater(Pawn P)
+{
+	local ScriptedController SC;
+	local ACTION_ChangeSquadMember Change;
+	local int i;
+
+	SC = ScriptedController(P.Controller);
+
+	// Not the state: while the level waits for the clients the script hasn't started yet
+	if(SC == None || SC.SequenceScript == None)
+		return false;
+
+	for(i = SC.ActionNum; i < SC.SequenceScript.Actions.Length; ++i)
+	{
+		Change = ACTION_ChangeSquadMember(SC.SequenceScript.Actions[i]);
+
+		if(Change != None && Change.bAddMember && Change.MemberTag == P.Tag)
+			return true;
+	}
+
+	return false;
+}
+
 function CoopPlayer FindWatcher(Pawn P)
 {
 	local Controller C;
@@ -6415,6 +6800,10 @@ function CheckSquadTakeover()
 		}
 
 		if(!CanBeTakenOver(P, Host.Pawn))
+			continue;
+
+		// Still in the squad until its script starts, it joins in its scene (GEO_01B: Fixer, see SpawnClient)
+		if(JoinsLater(P) && !SevIntro.IsSev(P))
 			continue;
 
 		// A client that already played this squad member gets it back right away, wherever it is
@@ -6905,6 +7294,50 @@ function int CountClients()
 	return n;
 }
 
+/*
+ * The squad member of a client is saved under its address and name. Through the Steam relay every client has the address 127.0.0.1:
+ * two players with the same name shared one entry and one of them lost its member (test: lobby through the relay). The client keeps the
+ * new name in its URL, so it comes back with it after a level change.
+ */
+function MakeNameUnique(PlayerController PC)
+{
+	local Controller C;
+	local string Base, NewName;
+	local int n;
+	local bool bTaken;
+
+	if(PC.PlayerReplicationInfo == None)
+		return;
+
+	Base = PC.PlayerReplicationInfo.PlayerName;
+	NewName = Base;
+	n = 1;
+
+	do
+	{
+		bTaken = false;
+
+		for(C = Level.ControllerList; C != None; C = C.nextController)
+		{
+			if(C != PC && PlayerController(C) != None && C.PlayerReplicationInfo != None && C.PlayerReplicationInfo.PlayerName ~= NewName)
+				bTaken = true;
+		}
+
+		if(bTaken)
+			NewName = Base $ "_" $ string(++n);
+	}
+	until(!bTaken || n > 8);
+
+	if(NewName == Base)
+		return;
+
+	Log("CoopGame: the name " $ Base $ " is taken, this player is " $ NewName);
+	PC.PlayerReplicationInfo.SetPlayerName(NewName);
+
+	if(CoopPlayer(PC) != None)
+		CoopPlayer(PC).ClientCoopKeepName(NewName);
+}
+
 function WaitForClients(PlayerController Host)
 {
 	// Test: CoopTestWait=<clients> waits for clients that never come (see CheckClientWaitTime)
@@ -6987,9 +7420,10 @@ function StopWaitingForClients()
 	Log("CoopGame: starting the level with " $ CountClients() $ " clients");
 
 	// Nothing but the controllers is replicated while the level is paused: clients that watch the entrance of their squad member
-	// get the member only now. The level runs 10 times slower until their cameras are on it (CheckSlowStart), at most 4 seconds.
-	// Not slower: replication goes by the level's time too.
-	if(CountWatchers() > 0)
+	// get the member only now, all clients only now get the commandos of a scene at the start (GEO_01C, the ropes: half of it was
+	// over). The level runs 10 times slower until their cameras are on it and they have the commandos (CheckSlowStart), at most 4
+	// seconds. Not slower: replication goes by the level's time too.
+	if(CountClients() > 0)
 	{
 		bSlowStart = true;
 		SlowStartTime = class'CoopNative'.static.GetRealTime();
@@ -7016,12 +7450,25 @@ function int CountWatchers()
 function CheckSlowStart()
 {
 	local Controller C;
-	local int Waiting;
+	local Pawn P;
+	local int Waiting, Commandos;
+
+	foreach DynamicActors(class'Pawn', P)
+	{
+		if(P.IsA('CloneCommando') && P.Health > 0 && P.bAlwaysRelevant)
+			++Commandos;
+	}
 
 	for(C = Level.ControllerList; C != None; C = C.nextController)
 	{
 		if(CoopPlayer(C) != None && CoopPlayer(C).bIntroWatch && !CoopPlayer(C).bWatchCameraOn)
 			++Waiting;
+
+		if(CoopPlayer(C) != None && !IsHost(C) && !CoopPlayer(C).bCommandosHere)
+		{
+			++Waiting;
+			CoopPlayer(C).ClientCoopCheckCommandos(Commandos);
+		}
 	}
 
 	if(Waiting > 0 && class'CoopNative'.static.GetRealTime() - SlowStartTime < 4)

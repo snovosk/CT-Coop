@@ -5,6 +5,7 @@
 #include <shlobj.h>
 #include <shellapi.h>
 #include <stdio.h>
+#include <wininet.h>
 
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "shell32.lib")
@@ -12,6 +13,8 @@
 #pragma comment(lib, "version.lib")
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "user32.lib")
+#pragma comment(lib, "wininet.lib")
+#pragma comment(lib, "ws2_32.lib")
 
 /*
  * CoopNative
@@ -984,4 +987,184 @@ void UCoopNative::execLogSystemInfo(FFrame& Stack, void* Result)
 		if(Module && GetModuleFileNameA(Module, ModulePath, MAX_PATH))
 			debugf("ModCoop: System: loaded %s", ModulePath);
 	}
+}
+
+/*
+ * The Steam connection is a separate program (CoopTunnel/Main.cpp): a failure in it can't take the game down, and the game only has to talk to
+ * 127.0.0.1. The game starts it and reads its status file, named after the game's process so that two copies of the game on one PC
+ * (tests) don't mix.
+ * Logging: "ModCoop: relay".
+ */
+static HANDLE GRelayProcess = NULL;
+static char   GRelayArgs[256] = "";
+
+static void RelayStatusPath(char* Out, INT OutSize)
+{
+	char Temp[MAX_PATH] = "";
+	GetTempPathA(MAX_PATH, Temp);
+	_snprintf_s(Out, OutSize, _TRUNCATE, "%sCoopTunnel-%u.status", Temp, GetCurrentProcessId());
+}
+
+void UCoopNative::execStartRelay(FFrame& Stack, void* Result)
+{
+	P_GET_STR(Args);
+	P_FINISH;
+
+	if(GRelayProcess && strcmp(GRelayArgs, *Args) == 0 && WaitForSingleObject(GRelayProcess, 0) == WAIT_TIMEOUT)
+		return;
+
+	if(GRelayProcess)
+	{
+		TerminateProcess(GRelayProcess, 0);
+		WaitForSingleObject(GRelayProcess, 2000);
+		CloseHandle(GRelayProcess);
+		GRelayProcess = NULL;
+	}
+
+	char Status[MAX_PATH];
+	RelayStatusPath(Status, sizeof(Status));
+	DeleteFileA(Status);
+
+	char Dir[MAX_PATH] = "";
+	GetModuleFileNameA(NULL, Dir, MAX_PATH);
+	char* Slash = strrchr(Dir, '\\');
+
+	if(Slash)
+		*Slash = 0;
+
+	strcat_s(Dir, "\\..\\CoopTunnel");
+
+	// TEST: extra arguments for runs on one PC (--direct instead of Steam)
+	char Extra[128] = "";
+	GetEnvironmentVariableA("COOP_RELAY_ARGS", Extra, sizeof(Extra));
+
+	char CommandLine[1024];
+	_snprintf_s(CommandLine, sizeof(CommandLine), _TRUNCATE, "\"%s\\CoopTunnel.exe\" %s --parent %u %s", Dir, *Args, GetCurrentProcessId(), Extra);
+
+	STARTUPINFOA        StartupInfo = {sizeof(StartupInfo)};
+	PROCESS_INFORMATION ProcessInfo = {0};
+
+	// steam_appid.txt is looked up in the working directory
+	if(CreateProcessA(NULL, CommandLine, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, Dir, &StartupInfo, &ProcessInfo))
+	{
+		CloseHandle(ProcessInfo.hThread);
+		GRelayProcess = ProcessInfo.hProcess;
+		strcpy_s(GRelayArgs, *Args);
+		debugf("ModCoop: relay started: %s", strchr(*Args, ' ') ? "join" : *Args);
+	}
+	else
+	{
+		debugf(NAME_Warning, "ModCoop: relay not started, error %u", GetLastError());
+	}
+}
+
+void UCoopNative::execReadRelayStatus(FFrame& Stack, void* Result)
+{
+	P_FINISH;
+
+	char Path[MAX_PATH];
+	RelayStatusPath(Path, sizeof(Path));
+
+	char   Text[4096] = "";
+	DWORD  Size = 0;
+	HANDLE File = CreateFileA(Path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, 0, NULL);
+
+	if(File != INVALID_HANDLE_VALUE)
+	{
+		ReadFile(File, Text, sizeof(Text) - 1, &Size, NULL);
+		CloseHandle(File);
+		Text[Size] = 0;
+	}
+
+	*static_cast<FString*>(Result) = Text;
+}
+
+void UCoopNative::execGetHostAddresses(FFrame& Stack, void* Result)
+{
+	P_FINISH;
+
+	FString Addresses;
+	char    Name[256];
+
+	if(gethostname(Name, sizeof(Name)) == 0)
+	{
+		hostent* Host = gethostbyname(Name);
+
+		for(INT i = 0; Host && Host->h_addrtype == AF_INET && Host->h_addr_list[i]; ++i)
+		{
+			const BYTE* Ip = reinterpret_cast<const BYTE*>(Host->h_addr_list[i]);
+
+			// Not reachable by anybody else
+			if(Ip[0] == 127 || (Ip[0] == 169 && Ip[1] == 254))
+				continue;
+
+			if(Addresses.Len() > 0)
+				Addresses += ", ";
+
+			char Text[32];
+			_snprintf_s(Text, sizeof(Text), _TRUNCATE, "%u.%u.%u.%u", Ip[0], Ip[1], Ip[2], Ip[3]);
+			Addresses += Text;
+		}
+	}
+
+	*static_cast<FString*>(Result) = Addresses;
+}
+
+static char          GPublicAddress[64] = "";
+static volatile LONG GPublicAddressReady = 0;
+static LONG          GPublicAddressAsked = 0;
+
+static DWORD WINAPI PublicAddressThread(void*)
+{
+	char  Text[64] = "";
+	DWORD Size = 0;
+	DWORD Timeout = 5000;
+
+	if(HINTERNET Net = InternetOpenA("ModCoop", INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0))
+	{
+		InternetSetOptionA(Net, INTERNET_OPTION_CONNECT_TIMEOUT, &Timeout, sizeof(Timeout));
+		InternetSetOptionA(Net, INTERNET_OPTION_RECEIVE_TIMEOUT, &Timeout, sizeof(Timeout));
+
+		if(HINTERNET Url = InternetOpenUrlA(Net, "https://api.ipify.org", NULL, 0, INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE, 0))
+		{
+			InternetReadFile(Url, Text, sizeof(Text) - 1, &Size);
+			InternetCloseHandle(Url);
+		}
+
+		InternetCloseHandle(Net);
+	}
+
+	Text[Size] = 0;
+
+	// Only an address goes on the screen, not whatever a proxy answered
+	UBOOL bValid = Size >= 7;
+
+	for(DWORD i = 0; i < Size; ++i)
+	{
+		if(!(Text[i] >= '0' && Text[i] <= '9') && Text[i] != '.')
+			bValid = 0;
+	}
+
+	if(bValid)
+	{
+		strcpy_s(GPublicAddress, Text);
+		InterlockedExchange(&GPublicAddressReady, 1);
+	}
+
+	return 0;
+}
+
+void UCoopNative::execGetPublicAddress(FFrame& Stack, void* Result)
+{
+	P_FINISH;
+
+	if(InterlockedExchange(&GPublicAddressAsked, 1) == 0)
+	{
+		HANDLE Thread = CreateThread(NULL, 0, PublicAddressThread, NULL, 0, NULL);
+
+		if(Thread)
+			CloseHandle(Thread);
+	}
+
+	*static_cast<FString*>(Result) = GPublicAddressReady ? GPublicAddress : "";
 }

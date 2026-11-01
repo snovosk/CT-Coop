@@ -34,6 +34,10 @@ public:
     void execInstallClientFixes(FFrame& Stack, void* Result);
     void execSetDebugStep(FFrame& Stack, void* Result);
     void execLogSystemInfo(FFrame& Stack, void* Result);
+    void execStartRelay(FFrame& Stack, void* Result);
+    void execReadRelayStatus(FFrame& Stack, void* Result);
+    void execGetHostAddresses(FFrame& Stack, void* Result);
+    void execGetPublicAddress(FFrame& Stack, void* Result);
     DECLARE_CLASS(UCoopNative,UObject,0,ModCoop)
     NO_DEFAULT_CONSTRUCTOR(UCoopNative)
     DECLARE_NATIVES(UCoopNative)

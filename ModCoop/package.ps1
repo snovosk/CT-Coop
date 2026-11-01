@@ -37,8 +37,13 @@ foreach($File in $SystemFiles)
 # Property overrides used by Mod.dll
 Copy-Item (Join-Path $System "PropertyOverrides") (Join-Path $Stage "System\PropertyOverrides") -Recurse
 
+# The Steam tunnel (built with: MSBuild CoopTunnel\CoopTunnel.vcxproj -p:Configuration=Release -p:Platform=x64)
+New-Item -ItemType Directory -Force (Join-Path $Stage "CoopTunnel") | Out-Null
+Get-ChildItem (Join-Path $GameData "CoopTunnel") -File | Where-Object { $_.Extension -in ".exe", ".dll", ".txt" } | ForEach-Object { Copy-Item $_.FullName (Join-Path $Stage "CoopTunnel") }
+if(!(Test-Path (Join-Path $Stage "CoopTunnel\CoopTunnel.exe"))) { throw "Missing build artifact: CoopTunnel.exe" }
+
 # Batch files and documentation go to the root of GameData
-Get-ChildItem $Dist -File | Where-Object { $_.Extension -in ".bat", ".md" } | ForEach-Object { Copy-Item $_.FullName $Stage }
+Get-ChildItem $Dist -File | Where-Object { $_.Extension -in ".bat", ".md", ".ps1" } | ForEach-Object { Copy-Item $_.FullName $Stage }
 
 if(Test-Path $Archive) { Remove-Item $Archive -Force }
 

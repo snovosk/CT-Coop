@@ -44,3 +44,16 @@ native static final function SetDebugStep(string Step);
 // Writes the computer, Windows, graphics card, the game's exe and the DLL wrappers next to it (d3d9, dgVoodoo, ReShade...) to the log,
 // for test reports
 native static final function LogSystemInfo();
+
+// Starts CoopTunnel (see CoopTunnel/Main.cpp) with these arguments instead of the running one, nothing if it already runs with them.
+// It ends together with the game. Without Steam it reports that in its status and ends.
+native static final function StartRelay(string Args);
+
+// The status file of the relay, lines of key=value. Empty until it has started.
+native static final function string ReadRelayStatus();
+
+// The addresses of this computer's network adapters (LAN, VPN), separated by ", "
+native static final function string GetHostAddresses();
+
+// The address of this computer in the internet, empty until known. The first call asks api.ipify.org in the background.
+native static final function string GetPublicAddress();

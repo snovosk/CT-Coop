@@ -17,6 +17,7 @@ var() MenuButtonEnum    Options[NUM_OPTIONS];
 var() MenuButtonSprite  OptionLeftArrows[NUM_OPTIONS];
 var() MenuButtonSprite  OptionRightArrows[NUM_OPTIONS];
 var() MenuText          HelpText;
+var() string            TitleText;
 
 simulated function Init(string Args)
 {
@@ -48,6 +49,7 @@ simulated function Init(string Args)
 	Options[OPTION_PLAYERS].Current = Clamp(class'CoopConfig'.default.LastMaxPlayers - 2, 0, Options[OPTION_PLAYERS].Items.Length - 1);
 
 	FocusOnWidget(Options[OPTION_LEVEL]);
+	MenuTitle.Text = TitleText $ " (MOD " $ class'CoopConfig'.static.Version() $ ")";
 }
 
 simulated function ChangeOption(int i, int Delta)
@@ -110,14 +112,14 @@ simulated function OnAButton()
 	class'CoopConfig'.static.StaticSaveConfig();
 	class'CoopConfig'.static.EndSession(); // The host never reconnects
 
-	class'GameEngine'.default.DisconnectMenuClass = "XInterfaceCTMenus.CTMultiplayerPCMenu";
+	class'GameEngine'.default.DisconnectMenuClass = "ModCoop.CoopMultiplayerMenu";
 	class'GameEngine'.default.DisconnectMenuArgs = "";
 
 	// Must be done before the server starts listening
 	class'CoopNative'.static.AddServerPackage("ModCoop");
 
 	GetPlayerOwner().MenuClose();
-	GetPlayerOwner().ClientTravel(Map $ "?game=ModCoop.CoopGame?listen?MaxPlayers=" $ Players, TRAVEL_Absolute, false);
+	GetPlayerOwner().ClientTravel("MPCustom?game=ModCoop.CoopGame?listen?MaxPlayers=" $ Players $ "?CoopLobby=1?CoopLobbyLevel=" $ Map, TRAVEL_Absolute, false);
 }
 
 simulated function HandleInputBack()
@@ -138,6 +140,7 @@ defaultproperties
 	OptionRightArrows(0)=(Blurred=(WidgetTexture=Texture'GUIContent.Menu.CT_ArrowRight',DrawColor=(B=255,G=255,R=255,A=255),DrawPivot=DP_MiddleMiddle,PosX=0.85,PosY=0.37,ScaleX=0.5,ScaleY=0.5),Focused=(DrawColor=(B=255,G=255,R=255,A=255),ScaleX=0.65,ScaleY=0.65),bIgnoreController=1,OnSelect="OnRight",Pass=2)
 	OptionRightArrows(1)=(Blurred=(PosX=0.85,PosY=0.45))
 	HelpText=(MenuFont=Font'OrbitFonts.OrbitBold15',Text="OTHER PLAYERS JOIN WITH YOUR IP ADDRESS (LAN OR VPN), PORT 7777. YOU ARE THE SERVER: PROGRESS AND CHECKPOINTS ARE YOURS.",DrawPivot=DP_MiddleLeft,PosX=0.1,PosY=0.62,ScaleX=0.6,ScaleY=0.6,MaxSizeX=0.8,bWordWrap=1,Pass=2,Style="LabelText")
-	AButton=(Blurred=(Text="START"),bHidden=0)
+	AButton=(Blurred=(Text="CREATE LOBBY"),bHidden=0)
+	TitleText="CO-OP CAMPAIGN: HOST"
 	Background=(WidgetTexture=Texture'GUIContent.Menu.CT_MainMenuGraphics',Style="FullScreen")
 }

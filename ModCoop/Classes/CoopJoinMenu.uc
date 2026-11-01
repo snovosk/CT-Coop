@@ -52,6 +52,7 @@ simulated function Init(string Args)
 	ErrorText.bHidden = 1;
 	StatusText.bHidden = 1;
 	FocusOnWidget(AddressBox);
+	MenuTitle.Text = "CO-OP CAMPAIGN: JOIN (MOD " $ class'CoopConfig'.static.Version() $ ")";
 
 	AutoConnect();
 }
@@ -122,7 +123,7 @@ simulated function Connect(string Address)
 	class'CoopConfig'.static.BeginSession(Address);
 
 	// Where to go if the connection fails for good
-	class'GameEngine'.default.DisconnectMenuClass = "XInterfaceCTMenus.CTMultiplayerPCMenu";
+	class'GameEngine'.default.DisconnectMenuClass = "ModCoop.CoopMultiplayerMenu";
 	class'GameEngine'.default.DisconnectMenuArgs = "";
 
 	Log("ModCoop: Connecting to " $ Address);

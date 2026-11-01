@@ -20,7 +20,7 @@ The mod is built on [SWRC-Modding/CT](https://github.com/SWRC-Modding/CT), the c
   with the patch. Every player needs the same version of the game.
 - **Windows 10 or 11** (32 or 64 bit). Nothing else has to be installed: no Visual C++ runtime, no .NET. Linux/Steam Deck with
   Proton isn't tested.
-- **The same co-op archive for every player.** The version is shown in the menu title (`MOD 0.7`) and at the start of the log.
+- **The same co-op archive for every player.** The version is shown in the menu title (`MOD 0.71`) and at the start of the log.
 - **A connection between the host and the clients:** the same local network, or the same VPN network (ZeroTier, Radmin VPN,
   Hamachi), or ports **7777 and 11138 (TCP and UDP)** forwarded on the host's router. The host allows `CT.exe` in the Windows firewall (the mod asks
   for it on the first start).
@@ -28,19 +28,23 @@ The mod is built on [SWRC-Modding/CT](https://github.com/SWRC-Modding/CT), the c
 
 ## Installation
 
-1. Find the game folder and the `GameData` folder inside it
-   (GOG: `C:\GOG Games\Star Wars - Republic Commando\GameData`,
-   Steam: `...\steamapps\common\Star Wars Republic Commando\GameData`).
-2. Extract the mod archive **directly into `GameData`**, replacing the existing files. You should now have
+### Steam version
+
+1. Extract the mod archive **directly into the game's `GameData` folder** (`...\steamapps\common\Star Wars Republic Commando\GameData`), replacing the existing files.
+2. Start the game **from Steam**, as usual. No shortcut or batch file is needed.
+
+If friends can't join you by IP, allow the game in the Windows firewall. Joining through Steam doesn't need that.
+
+### Other versions (GOG, disc)
+
+1. Extract the mod archive **directly into the game's `GameData` folder** (for example `C:\GOG Games\Star Wars - Republic Commando\GameData`), replacing the existing files. You should now have
    `GameData\System\CT.exe`, `ModCoop.u`, `ModCoop.dll`, `Mod.u` and `Mod.dll`.
-3. Start **`GameData\System\CT.exe`** once. On the first start the mod:
+2. Start **`GameData\System\CT.exe`** once. On the first start the mod:
    - creates a **"Star Wars Republic Commando Co-op"** shortcut on the desktop — use it to start the game from now on;
    - asks whether CT.exe may pass the Windows firewall. Answer "Yes" and confirm the administrator prompt:
      without it your friends can't connect when you are the host (Windows silently blocks the connections).
    Both steps happen only once. A deleted shortcut is not created again.
    To repeat a step, delete `GameData\Save\ModCoopShortcut.done` or `ModCoopFirewall.done`.
-
-The normal `SWRepublicCommando.exe` and the old game shortcut still work as before, just without co-op.
 
 **Every player needs the mod, and everyone needs the same version.** The easiest way is to give your friends the same archive.
 
@@ -153,6 +157,25 @@ are built from the same source code, including all changes of 2.15 (the NVIDIA b
 Fix over the co-op files: it replaces `CT.exe`, `Mod.u` and `System.ini` with older versions and the host drops players whose
 files differ. If you installed SWRC Fix before, just extract the co-op archive over it.
 
+## Lobby
+
+`CO-OP: HOST CAMPAIGN` now creates a lobby. Friends connect, each picks a squad member (or ANY), the host picks the level. When everybody has pressed READY (at least one friend is needed), the level starts for all at once. Joining a running game still works.
+
+## Playing through Steam (no port forwarding, no VPN)
+
+Everything happens inside the game, start it the usual way. Everybody needs Steam running and **Republic Commando on their Steam account**; the entry below doesn't appear otherwise. An earlier build was played between two PCs; the current helper program has been tested on one PC so far.
+
+1. **Host:** `CO-OP: HOST CAMPAIGN`, create the lobby. A small helper program (`CoopTunnel`) starts by itself and ends with the game.
+2. **Friends:** `MULTIPLAYER > CO-OP: STEAM FRIENDS` shows the friends who are hosting, pick one. You must be Steam friends and the host must not be Invisible.
+
+## Playing by IP (all versions of the game)
+
+The lobby shows the host's addresses on screen. `LAN / VPN IP` works as it is on the same network or VPN, `INTERNET IP` needs forwarded ports. To show it, the host's game asks `api.ipify.org` once. Friends enter the address in `CO-OP: JOIN BY IP`.
+
+## Sending logs
+
+After playing, close the game and run `Collect-Logs.bat` in `GameData`. It packs the logs of the game and the tunnel into `CoopLogs-<date>.zip` and shows the file; the names of the computer and the user and Steam IDs are masked.
+
 ## Helping with tests
 
 Everything that happens in a co-op game is written to `GameData\System\CT.log` (the file is replaced on the next start of the
@@ -164,7 +187,7 @@ game, so copy it right after playing). Please send with a report:
   from the host and from the client at the same place).
 
 The first lines of the log contain what's needed to tell problems of the computer from problems of the mod: the mod's version
-(`ModCoop version 0.7`), Windows, processor, memory, graphics card, the resolution of the desktop, the game's exe and the
+(`ModCoop version 0.71`), Windows, processor, memory, graphics card, the resolution of the desktop, the game's exe and the
 wrappers next to it (`ModCoop: System: ...`). There is no personal data in it besides the names of the computer and of the
 Windows user, which the engine itself writes (`Init: Computer`, `Init: User`); remove them if you like.
 
@@ -173,11 +196,11 @@ Windows user, which the engine itself writes (`Init: Computer`, `Init: User`); r
 | Problem | Solution |
 |---|---|
 | The client can't connect: `NO ANSWER FROM THE HOST` or an empty checkered room | The host doesn't answer. Check in this order: **1)** the host has started the server (their `CT.log` contains the line `TcpNetDriver on port 7777`); **2)** the firewall was allowed on the host PC at the first start (if you answered "No", delete `GameData\Save\ModCoopFirewall.done` and start the game again); **3)** you connect to the host's IP address **in ZeroTier** (shown in the host's ZeroTier client under "Managed IPs"), not to their home IP address; **4)** both PCs are in the same ZeroTier network and marked `Auth` on my.zerotier.com; **5)** zapret, antivirus software or another VPN — turn them off for a moment and try again. The checkered room is a placeholder map the game shows while it waits for the connection; your textures are fine. |
-| The host's log shows `Login request`/`Login from ...`, but the client is dropped right away (the client's log shows `Welcomed by server`, then `Close`) | **You have different versions of the mod.** Every build of the mod is unique, and the engine silently drops the connection if the files don't match. Both players must extract **the same archive** (the version is shown in the menu title, e.g. `CO-OP CAMPAIGN: JOIN (MOD 0.7)`, and at the start of the log: `ModCoop version 0.7`). The host writes `ModCoop version mismatch` with both versions to its log. Versions before 0.4 were called 1.x (release 0.3 shows `MOD 1.3` in the menu). |
+| The host's log shows `Login request`/`Login from ...`, but the client is dropped right away (the client's log shows `Welcomed by server`, then `Close`) | **You have different versions of the mod.** Every build of the mod is unique, and the engine silently drops the connection if the files don't match. Both players must extract **the same archive** (the version is shown in the menu title, e.g. `CO-OP CAMPAIGN: JOIN (MOD 0.71)`, and at the start of the log: `ModCoop version 0.71`). The host writes `ModCoop version mismatch` with both versions to its log. Versions before 0.4 were called 1.x (release 0.3 shows `MOD 1.3` in the menu). |
 | zapret (zapret-discord-youtube) | By itself it doesn't affect ZeroTier addresses `10.x.x.x`, `172.16–31.x.x` or the local network: they are in its `ipset-exclude.txt`. But with **Game Filter** enabled it intercepts all UDP ports 1024–65535, so for Radmin (`26.x.x.x`), Hamachi (`25.x.x.x`) or if you changed the lists, turn Game Filter off (service.bat → option 4) or add the host's address to `lists\ipset-exclude-user.txt`. |
 | Connected, but dropped right away with "SERVER CONTENT ... IS NOT PRESENT" | The client has a different version of the mod or no mod at all. Install the same archive as the host. |
 | "YOUR CD KEY IS INVALID OR IN USE" | Since 0.57 the host doesn't check the CD keys of clients. If you see this message, the host has an old version of the mod. |
-| The CO-OP menu entries don't open | The game wasn't started with `CT.exe`, or `EnableCustomMenu` is turned off in the `[Mod.SWRCFix]` section of `System.ini`. Start the game with the "Star Wars Republic Commando Co-op" shortcut or `GameData\System\CT.exe`. |
+| The CO-OP menu entries don't open | GOG or disc version: the game wasn't started with `CT.exe`, or `EnableCustomMenu` is turned off in the `[Mod.SWRCFix]` section of `System.ini`. Start the game with the "Star Wars Republic Commando Co-op" shortcut or `GameData\System\CT.exe`. |
 | Nothing starts at all (neither `CT.exe` nor the normal `SWRepublicCommando.exe`), especially if the game was copied from another PC | **1)** The `GameData\Save` folder was copied with someone else's settings (resolution, sound, graphics card, `Mod.ModRenderDevice` renderer). Run `GameData\System\RestoreDefaultSystemSettings.bat`: it renames `Save\System.ini` to `BackupSystem.ini` and the game creates new settings. If that doesn't help, rename `Save\User.ini` in the same way. **2)** An old archive of the mod (1.0/1.1) is installed: its files required "Visual C++ 2015–2022 x86". Since 1.2 it isn't needed — extract a current archive. **3)** Both copies of the game must be the same version: don't mix files of two different releases in one folder. |
 | The game crashes when `CT.exe` starts | Make sure you extracted **all** files of the archive and replaced the old ones (especially `Mod.u` and `Mod.dll` — they must come from this archive). |
 | The host left the game | Clients try to reconnect 12 times (about 4 minutes), then show "THE HOST IS NOT AVAILABLE" — press `BACK`. If the host starts the server again in the meantime, the clients connect by themselves. |

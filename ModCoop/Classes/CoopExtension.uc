@@ -29,6 +29,7 @@ var FunctionOverride SetCollisionOverride;      // Collision changes of scripts 
 var FunctionOverride SetHiddenOverride;
 var FunctionOverride GotoStateOverride;
 var FunctionOverride PlayAnimOverride;
+var FunctionOverride PlayPropAnimOverride;
 var FunctionOverride CriticalMessageOverride;
 var FunctionOverride ActivateItemTransitionOverride; // Effects for the clients (see CoopGame.ForwardEffect)
 var FunctionOverride DispenserTransitionOverride;
@@ -98,6 +99,8 @@ function Init(SWRCFix Fix)
 	SetHiddenOverride.Init(class'ACTION_SetHidden', 'InitActionFor', self, 'SetHiddenInitActionFor');
 	PlayAnimOverride = new class'FunctionOverride';
 	PlayAnimOverride.Init(class'ACTION_PlayAnim', 'InitActionFor', self, 'PlayAnimInitActionFor');
+	PlayPropAnimOverride = new class'FunctionOverride';
+	PlayPropAnimOverride.Init(class'ACTION_PlayPropAnim', 'InitActionFor', self, 'PlayPropAnimInitActionFor');
 	GotoStateOverride = new class'FunctionOverride';
 	GotoStateOverride.Init(class'ACTION_GotoState', 'InitActionFor', self, 'GotoStateInitActionFor');
 	CriticalMessageOverride = new class'FunctionOverride';
@@ -842,6 +845,30 @@ function bool PlayAnimInitActionFor(ScriptedController C)
 
 	if(C.Pawn != None && Action.BaseAnim != '' && CoopGame(C.Level.Game) != None)
 		CoopGame(C.Level.Game).ForwardScriptAnim(C.Pawn, Action.BaseAnim, Action.AnimRate, Action.bLoopAnim || Action.AnimIterations > 0);
+
+	return bResult;
+}
+
+// The same for the animations of pawns a script plays as a prop (see CoopGame.ForwardPropAnim)
+function bool PlayPropAnimInitActionFor(ScriptedController C)
+{
+	local ACTION_PlayPropAnim Action;
+	local Pawn P;
+	local bool bResult;
+
+	Action = ACTION_PlayPropAnim(PlayPropAnimOverride.CurrentSelf);
+	bResult = Action.InitActionFor(C);
+
+	if(CoopGame(C.Level.Game) == None || Action.BaseAnim == '')
+		return bResult;
+
+	if(Action.AnimPropTag == '')
+		CoopGame(C.Level.Game).ForwardPropAnim(C.GetInstigator(), Action.BaseAnim, Action.AnimRate);
+	else
+	{
+		foreach C.AllActors(class'Pawn', P, Action.AnimPropTag)
+			CoopGame(C.Level.Game).ForwardPropAnim(P, Action.BaseAnim, Action.AnimRate);
+	}
 
 	return bResult;
 }

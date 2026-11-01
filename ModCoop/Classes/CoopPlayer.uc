@@ -60,6 +60,9 @@ struct SmoothedPawn
 	var vector LastVelocity;
 	var vector Offset;
 	var vector BasePrePivot;
+	var vector UpdateLocation;  // Where the last update without a velocity put it
+	var float UpdateTime;
+	var float ChaseSpeed;       // Speed that brings the mesh there by the time the next update comes
 };
 var array<SmoothedPawn> SmoothedPawns;
 var vector      BlockCheckLocation;   // Client only: see CheckBlocked
@@ -87,6 +90,19 @@ var Pawn        TurretPawn;               // Client: the pawn that manned the tu
 var int         SentTurretYaw, SentTurretPitch;
 var float       NextTurretSend, NextTurretLog;
 var string      LastWeaponTrace;
+var int         LobbyMember;               // Server: the member picked in the lobby (1-3, see CoopLobby)
+var bool        bLobbyReady;               // Server: see CoopLobby
+var string      LobbyState;                // Client: see CoopLobby.StateString
+var bool        bCommandosHere;            // Server: see ClientCoopCheckCommandos
+var bool        bWatchedOnRope;            // Server: the member this client watches is on a rope (CoopGame.CheckRopeLandings)
+var bool        bTestNetJump;              // Test only: see TestNetJump
+var array<Pawn>  JumpPawns;
+var array<vector> JumpLocs;
+var array<int>   JumpFrames, JumpMoved, JumpOver;
+var array<float> JumpMax, JumpSum;
+var float       NextJumpLog;
+var vector      JumpCamera;
+var float       JumpCameraMax;
 var Weapon      ServerHands;               // See ParkServerHands
 var CoopAnimController AnimController;     // Client: see ClientCoopScriptAnim
 var int         LastCommandoCount;          // Client: see LogCommandos
@@ -122,11 +138,11 @@ replication
 	reliable if(Role == ROLE_Authority)
 		ClientCoopDumpProps, ClientCoopObjectiveTracker, ClientCoopBlinkHUD, ClientCoopShakeView, ClientCoopScreenFade, ClientCoopCriticalMessage, ClientCoopSetObjectives, ClientCoopTestLag, ClientCoopTestCommand, ClientCoopProbe, ClientCoopSetWatchFocus, ClientCoopSetCollisionByTag, ClientCoopSetHiddenByTag, ClientCoopSetMarkerState, ClientCoopManTurret, ClientCoopLeaveTurret, ClientCoopScriptAnim, ClientCoopEndScriptAnim, ClientCoopLiftView, ClientCoopHideRiders, ClientCoopWeaponsQuiet, ClientCoopHostWaitAnim, ClientCoopEndHostWaitAnim, ClientCoopRunAction, ClientCoopTriggerActor, ClientCoopTriggerLocal, ClientCoopTriggerMaterial;
 	unreliable if(Role == ROLE_Authority)
-		ClientCoopSetSquadState, ClientCoopSpawnEffect, ClientCoopSetPanelProgress, ClientCoopSetLight;
+		ClientCoopSetSquadState, ClientCoopSpawnEffect, ClientCoopSetPanelProgress, ClientCoopSetLight, ClientCoopKeepScriptAnim, ClientCoopCheckCommandos;
 	reliable if(Role == ROLE_Authority)
-		ClientCoopSetActorDisplay, ClientCoopSetActorLook, ClientCoopSetPanelLinks, ClientCoopSetMarkerLink;
+		ClientCoopSetActorDisplay, ClientCoopSetActorLook, ClientCoopSetPanelLinks, ClientCoopSetMarkerLink, ClientCoopLobbyState, ClientCoopKeepName;
 	reliable if(Role < ROLE_Authority)
-		ServerTeleportToHost, ServerCoopSetTarget, ServerCoopUsingItem, ServerCoopUsePanel, ServerCoopStartHandSignal, ServerCoopReady, ServerCoopWatchCameraOn, ServerCoopUseTurret, ServerCoopMapActorMissing;
+		ServerTeleportToHost, ServerCoopSetTarget, ServerCoopUsingItem, ServerCoopUsePanel, ServerCoopStartHandSignal, ServerCoopReady, ServerCoopWatchCameraOn, ServerCoopUseTurret, ServerCoopMapActorMissing, ServerCoopLobbyChoose, ServerCoopLobbyReady, ServerCoopLobbyLevel, ServerCoopCommandosHere;
 	unreliable if(Role < ROLE_Authority)
 		ServerCoopTurretAim;
 }
@@ -291,6 +307,60 @@ simulated function ClientCoopSetHiddenByTag(name ActorTag, bool bHidden)
 	}
 }
 
+// See CoopGame.MakeNameUnique
+simulated function ClientCoopKeepName(string NewName)
+{
+	UpdateURL("Name", NewName, false);
+}
+
+// See CoopLobby
+simulated function ClientCoopLobbyState(string NewState)
+{
+	if(LobbyState != NewState)
+		Log("ModCoop: lobby: " $ NewState);
+
+	LobbyState = NewState;
+}
+
+function ServerCoopLobbyChoose(int Member)
+{
+	if(CoopGame(Level.Game) != None && CoopGame(Level.Game).Lobby != None)
+		CoopGame(Level.Game).Lobby.Choose(self, Member);
+}
+
+function ServerCoopLobbyReady(bool bReady)
+{
+	if(CoopGame(Level.Game) != None && CoopGame(Level.Game).Lobby != None)
+		CoopGame(Level.Game).Lobby.SetReady(self, bReady);
+}
+
+function ServerCoopLobbyLevel(string NewLevel)
+{
+	if(CoopGame(Level.Game) != None && CoopGame(Level.Game).Lobby != None)
+		CoopGame(Level.Game).Lobby.SetLevel(self, NewLevel);
+}
+
+// See CoopGame.CheckSlowStart: the client tells the server when it has the commandos of the level
+simulated function ClientCoopCheckCommandos(int Expected)
+{
+	local Pawn P;
+	local int n;
+
+	foreach DynamicActors(class'Pawn', P)
+	{
+		if(P.IsA('CloneCommando'))
+			++n;
+	}
+
+	if(n >= Expected)
+		ServerCoopCommandosHere();
+}
+
+function ServerCoopCommandosHere()
+{
+	bCommandosHere = true;
+}
+
 // See CoopGame.ForwardScriptAnim
 simulated function ClientCoopScriptAnim(Pawn P, name Anim, float Rate, bool bLoop)
 {
@@ -313,6 +383,27 @@ simulated function ClientCoopScriptAnim(Pawn P, name Anim, float Rate, bool bLoo
 
 	if(class'CoopConfig'.default.bDebugLog)
 		Log("ModCoop: Script animation " $ Anim $ " of " $ P $ " (loop " $ bLoop $ ")");
+}
+
+// Repeated by the server while the animation plays: for a client that didn't have the pawn when it started, and because something on
+// the client puts the idle pose back while the pawn is on its way down a rope (GEO_04A; what it is wasn't found: the check below holds)
+simulated function ClientCoopKeepScriptAnim(Pawn P, name Anim, float Rate, bool bLoop, float Frame)
+{
+	local name Seq;
+	local float OwnFrame;
+
+	if(Level.NetMode != NM_Client || P == None)
+		return;
+
+	P.GetAnimParams('', Seq, OwnFrame);
+
+	if(Seq == Anim && AnimController != None && P.Controller == AnimController)
+		return;
+
+	ClientCoopScriptAnim(P, Anim, Rate, bLoop);
+
+	if(AnimController != None && P.Controller == AnimController)
+		P.PlayAnim(Anim, , Rate, Frame);
 }
 
 simulated function ClientCoopEndScriptAnim(Pawn P)
@@ -768,6 +859,9 @@ simulated function FixHandSignalWeapon(float DeltaTime)
  * around) end up far from where the server has them and jump to the new position with every update: 60-130 units several times
  * per second at 50-90 ms latency. The jump is hidden by drawing the mesh at the old position (PrePivot) and moving it to the real
  * one within about a tenth of a second. Collision and hits are not affected.
+ * Pawns moved by an animation (the ropes) or without physics arrive with velocity 0, 6-20 times a second (test rope with NetJump): the
+ * client has nothing to move them with between updates and predicting from the last two overshoots (updates are irregular). The mesh
+ * then moves at a steady speed that reaches each update's position when the next one is due: it is about one update behind.
  */
 simulated function SmoothProxies(float DeltaTime)
 {
@@ -813,6 +907,38 @@ simulated function SmoothProxies(float DeltaTime)
 		}
 
 		DebugStep("SmoothProxies: " $ P);
+		if(VSize(P.Velocity) < 1 && VSize(SmoothedPawns[i].LastVelocity) < 1)
+		{
+			// The mesh stays where it was drawn
+			SmoothedPawns[i].Offset += SmoothedPawns[i].LastLocation - P.Location;
+			ErrorSize = VSize(SmoothedPawns[i].Offset);
+
+			if(ErrorSize > 1500) // Teleported
+			{
+				SmoothedPawns[i].Offset = vect(0,0,0);
+				ErrorSize = 0;
+			}
+
+			if(P.Location != SmoothedPawns[i].UpdateLocation)
+			{
+				SmoothedPawns[i].ChaseSpeed = ErrorSize / FClamp(Level.TimeSeconds - SmoothedPawns[i].UpdateTime, 0.03, 0.25);
+				SmoothedPawns[i].UpdateLocation = P.Location;
+				SmoothedPawns[i].UpdateTime = Level.TimeSeconds;
+			}
+
+			if(ErrorSize <= SmoothedPawns[i].ChaseSpeed * DeltaTime)
+				SmoothedPawns[i].Offset = vect(0,0,0);
+			else
+				SmoothedPawns[i].Offset -= Normal(SmoothedPawns[i].Offset) * SmoothedPawns[i].ChaseSpeed * DeltaTime;
+
+			P.PrePivot = SmoothedPawns[i].BasePrePivot + SmoothedPawns[i].Offset;
+			SmoothedPawns[i].LastLocation = P.Location;
+			SmoothedPawns[i].LastVelocity = P.Velocity;
+			continue;
+		}
+
+		SmoothedPawns[i].UpdateLocation = P.Location;
+		SmoothedPawns[i].UpdateTime = Level.TimeSeconds;
 		Error = P.Location - (SmoothedPawns[i].LastLocation + SmoothedPawns[i].LastVelocity * DeltaTime);
 		ErrorSize = VSize(Error);
 
@@ -1100,6 +1226,8 @@ event PlayerTick(float DeltaTime)
 		DebugStep("EnsureGrenade");
 		EnsureGrenade();
 		SmoothProxies(DeltaTime);
+		if(bTestNetJump)
+			TestNetJump(DeltaTime);
 		LogClientStatus();
 
 		if(Level.TimeSeconds >= NextHostSkinCheck)
@@ -1829,6 +1957,10 @@ event PlayerCalcView(out actor ViewActor, out vector CameraLocation, out rotator
 
 	Super.PlayerCalcView(ViewActor, CameraLocation, CameraRotation);
 
+	// The lobby: the loading screen closes every menu when the map is up, so the menu opens whenever none is open (see CoopLobby)
+	if(LobbyState != "" && LobbyState != "START" && Player != None && Player.Console != None && Player.Console.CurMenu == None)
+		ClientOpenMenu("ModCoop.CoopLobbyMenu");
+
 	if(CoopGame(Level.Game) != None && CoopGame(Level.Game).bWaitingForClients)
 		CoopGame(Level.Game).CheckClientWaitTime();
 
@@ -1839,6 +1971,18 @@ event PlayerCalcView(out actor ViewActor, out vector CameraLocation, out rotator
 	if(Level.NetMode == NM_Client)
 	{
 		CalcWatchView(ViewActor, CameraLocation, CameraRotation);
+
+		// Looking through another pawn: at what is drawn (see SmoothProxies), the scene camera is smoothed itself
+		if(WatchCameraPawn == None && Pawn(ViewTarget) != None && ViewTarget != Pawn)
+			CameraLocation += ViewTarget.PrePivot;
+
+		if(bTestNetJump)
+		{
+			if(VSize(CameraLocation - JumpCamera) > JumpCameraMax)
+				JumpCameraMax = VSize(CameraLocation - JumpCamera);
+
+			JumpCamera = CameraLocation;
+		}
 
 		// The host waits with the level until every client sees it (CoopGame.CheckClientsArrived). Here because the level is
 		// paused while the host waits: PlayerTick doesn't run, the view is still calculated.
@@ -2423,6 +2567,7 @@ simulated function ClientCoopTestLag(int Milliseconds)
 simulated function ClientCoopTestCommand(string Command)
 {
 	local ActivateItem Panel;
+	local Pawn FacingPawn;
 
 	// Holding fire like the button (the console alias Fire doesn't work from a console command)
 	if(Command ~= "HoldFire" || Command ~= "ReleaseFire")
@@ -2480,6 +2625,32 @@ simulated function ClientCoopTestCommand(string Command)
 		return;
 	}
 
+	// Test only: see FacingLine
+	if(Command ~= "FacingLog")
+	{
+		foreach DynamicActors(class'Pawn', FacingPawn)
+		{
+			if(FacingPawn != Pawn && FacingPawn.Health > 0 && !FacingPawn.IsA('Turret'))
+				Log("CoopTest: facing: client " $ FacingLine(FacingPawn));
+		}
+
+		return;
+	}
+
+	// Test only: see RopeLine
+	if(Command ~= "RopeLog")
+	{
+		Log("CoopTest: rope: client " $ RopeLines(self));
+		return;
+	}
+
+	// Test only: see TestNetJump
+	if(Command ~= "NetJump")
+	{
+		bTestNetJump = true;
+		return;
+	}
+
 	if(Command ~= "TurretLog")
 	{
 		Log("CoopTest: aim: client Yaw=" $ TurretYaw $ " Pitch=" $ TurretPitch $ " view=" $ Rotation $ " Loc=" $ Pawn.Location $ " eye=" $ Pawn.EyePosition() $ " " $ TurretBones(Turret(Machine)));
@@ -2499,6 +2670,117 @@ simulated function ClientCoopProbe(vector Loc, float Radius, int Step)
 		if(A.bCollideActors && (A.bBlockPlayers || A.bBlockActors) && Pawn(A) == None && (VSize(A.Location - Loc) < Radius || Volume(A) != None || Mover(A) != None || A.IsA('BlockingVolume')))
 			Log("CoopTest: probe: client " $ Step $ " " $ A $ " (" $ A.Class $ ") Tag=" $ A.Tag $ " State=" $ A.GetStateName() $ " Hidden=" $ A.bHidden $ " Role=" $ A.Role $ " Static=" $ A.bStatic $ " Block=" $ A.bBlockActors $ A.bBlockPlayers $ " Mesh=" $ A.StaticMesh $ " Loc=" $ A.Location $ " Dist=" $ int(VSize(A.Location - Loc)));
 	}
+}
+
+// Test only: where a pawn looks and where it goes (test facing)
+static function string FacingLine(Pawn P)
+{
+	local name Seq;
+	local float Frame;
+
+	P.GetAnimParams('', Seq, Frame);
+
+	return P.Class.Name $ " Loc=" $ int(P.Location.X) $ "," $ int(P.Location.Y) $ " yaw=" $ (P.Rotation.Yaw & 65535) $ " vel=" $ (rotator(P.Velocity).Yaw & 65535) $ " speed=" $ int(VSize(P.Velocity)) $ " anim=" $ Seq $ " phys=" $ P.Physics $ " pau=" $ P.bPhysicsAnimUpdate;
+}
+
+// Test only: the commandos and the ropes as this side has them (test rope)
+static function string RopeLines(Actor Here)
+{
+	local Actor A;
+	local string Line;
+	local name Seq;
+	local float Frame;
+
+	foreach Here.AllActors(class'Actor', A)
+	{
+		if(A.IsA('Rope') || A.IsA('CloneCommando'))
+		{
+			A.GetAnimParams('', Seq, Frame);
+			Line = Line $ " | " $ A.Class.Name $ " tag=" $ A.Tag $ " hidden=" $ A.bHidden $ " role=" $ A.Role $ " anim=" $ Seq $ " f=" $ int(Frame * 100) $ " z=" $ int(A.Location.Z) $ " rate=" $ A.IsAnimating() $ " phys=" $ A.Physics;
+
+			if(Pawn(A) != None)
+				Line = Line $ " pau=" $ Pawn(A).bPhysicsAnimUpdate $ " ctrl=" $ Pawn(A).Controller $ " vel=" $ int(VSize(A.Velocity));
+		}
+	}
+
+	return Line;
+}
+
+// Test only: per second and pawn on the client: frames, frames it moved, biggest step of a frame against what its speed explains
+simulated function TestNetJump(float DeltaTime)
+{
+	local Pawn P;
+	local int i;
+	local float Step;
+
+	foreach DynamicActors(class'Pawn', P)
+	{
+		if(P == Pawn || P.Health <= 0 || P.IsA('Turret'))
+			continue;
+
+		for(i = 0; i < JumpPawns.Length; ++i)
+		{
+			if(JumpPawns[i] == P)
+				break;
+		}
+
+		if(i == JumpPawns.Length)
+		{
+			JumpPawns[i] = P;
+			JumpLocs[i] = P.Location;
+			JumpFrames[i] = 0;
+			JumpMoved[i] = 0;
+			JumpMax[i] = 0;
+			JumpSum[i] = 0;
+			JumpOver[i] = 0;
+			continue;
+		}
+
+		Step = VSize(P.Location + P.PrePivot - JumpLocs[i]);
+		JumpLocs[i] = P.Location + P.PrePivot;
+		JumpFrames[i] = JumpFrames[i] + 1;
+
+		if(Step > 0.01)
+			JumpMoved[i] = JumpMoved[i] + 1;
+
+		JumpSum[i] = JumpSum[i] + Step;
+
+		if(Step > JumpMax[i])
+			JumpMax[i] = Step;
+
+		// Faster than a commando can run in this frame
+		if(Step > FMax(VSize(P.Velocity), 300) * DeltaTime * 2 + 5)
+			JumpOver[i] = JumpOver[i] + 1;
+	}
+
+	if(Level.TimeSeconds < NextJumpLog)
+		return;
+
+	NextJumpLog = Level.TimeSeconds + 1;
+	Log("CoopTest: jump: t=" $ int(Level.TimeSeconds) $ " camera state=" $ GetStateName() $ " watch=" $ WatchCameraPawn $ " max=" $ int(JumpCameraMax));
+	JumpCameraMax = 0;
+
+	for(i = 0; i < JumpPawns.Length; ++i)
+	{
+		if(JumpPawns[i] != None && JumpSum[i] > 1)
+			Log("CoopTest: jump: t=" $ int(Level.TimeSeconds) $ " " $ JumpPawns[i].Class.Name $ " frames=" $ JumpFrames[i] $ " moved=" $ JumpMoved[i] $ " jumps=" $ JumpOver[i] $ " max=" $ int(JumpMax[i]) $ " dist=" $ int(JumpSum[i]) $ " vel=" $ int(VSize(JumpPawns[i].Velocity)) $ " anim=" $ TestAnimName(JumpPawns[i]) $ " phys=" $ JumpPawns[i].Physics $ " freq=" $ JumpPawns[i].NetUpdateFrequency);
+
+		JumpFrames[i] = 0;
+		JumpMoved[i] = 0;
+		JumpMax[i] = 0;
+		JumpSum[i] = 0;
+		JumpOver[i] = 0;
+	}
+}
+
+static function name TestAnimName(Actor A)
+{
+	local name Seq;
+	local float Frame;
+
+	A.GetAnimParams('', Seq, Frame);
+
+	return Seq;
 }
 
 static function string TurretBones(Turret T)

@@ -7,7 +7,7 @@ class CoopConfig extends Object config(ModCoop);
  */
 
 // Mod version. Every player must have the same build (the package GUIDs must match), so increase this with every release.
-const MOD_VERSION = "0.7";
+const MOD_VERSION = "0.71";
 
 var string               RecentAddresses[5]; // Most recent first, loaded from RecentAddressList (see LoadLists)
 // Lists are saved as one string in their own section (CoopNative.WriteSavedString): the config writer of RC comments out values
@@ -190,6 +190,26 @@ static function string Version()
 }
 
 // URL used to connect to a coop host. The version lets the host reject incompatible clients with a clear message.
+// One value of the relay's status (see CoopNative.ReadRelayStatus), empty if it's not there
+static function string RelayValue(string Status, string Key)
+{
+	local int i;
+
+	Status = Chr(10) $ Status;
+	i = InStr(Status, Chr(10) $ Key $ "=");
+
+	if(i == -1)
+		return "";
+
+	Status = Mid(Status, i + Len(Key) + 2);
+	i = InStr(Status, Chr(10));
+
+	if(i == -1)
+		return Status;
+
+	return Left(Status, i);
+}
+
 static function string MakeConnectURL(string Address)
 {
 	return Address $ "?CoopVersion=" $ MOD_VERSION;
