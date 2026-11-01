@@ -7,7 +7,7 @@ class CoopConfig extends Object config(ModCoop);
  */
 
 // Mod version. Every player must have the same build (the package GUIDs must match), so increase this with every release.
-const MOD_VERSION = "0.6";
+const MOD_VERSION = "0.7";
 
 var string               RecentAddresses[5]; // Most recent first, loaded from RecentAddressList (see LoadLists)
 // Lists are saved as one string in their own section (CoopNative.WriteSavedString): the config writer of RC comments out values
@@ -21,6 +21,7 @@ var config int           DefaultPort;
 
 // Reconnect state (client only). Kept in memory, not saved.
 var int    TravelClients;                  // Host: clients that played the last level, the next one waits for them (see CoopGame.WaitForClients)
+var bool bFixedSquad; // Every client only plays its assigned squad member, set by ?CoopFixedSquad (CoopTest.bat), kept across level changes
 var string ReconnectAddress;               // Address of the coop host we are playing on. Empty if not in a coop session.
 var int    ReconnectAttempts;
 var config int MaxReconnectAttempts;

@@ -35,6 +35,13 @@ var FunctionOverride DispenserTransitionOverride;
 var FunctionOverride FactoryRangeTestOverride;     // Players without a pawn (see FactoryPlayerRangeTest)
 var FunctionOverride FactoryCovertOverride;
 var FunctionOverride FactoryGenerateOverride;
+var FunctionOverride TriggerRelevantOverride;    // Squad triggers for the clients' members (see TriggerIsRelevant)
+var FunctionOverride CounterTriggerOverride;     // Diagnostics: counters of level scripts (see CounterTrigger)
+var FunctionOverride AttachmentEffectsOverride;  // Animations of other players' commandos (see AttachmentThirdPersonEffects)
+var FunctionOverride AttachmentBeginOverride;    // Same, when the attachment is spawned (see AttachmentPostNetBeginPlay)
+var array<CoopTurretFire> TurretFires;           // Shots of clients on turrets (see CoopTurretFire)
+var FunctionOverride WeaponSetOverride;          // Quiet new inventory on clients (see WeaponClientWeaponSet)
+var array<CoopActionForward> ActionForwards;     // Script actions that only reach the server's player (see CoopActionForward)
 
 function Init(SWRCFix Fix)
 {
@@ -105,6 +112,54 @@ function Init(SWRCFix Fix)
 	FactoryCovertOverride.Init(class'Factory', 'IsLocationCovert', self, 'FactoryIsLocationCovert');
 	FactoryGenerateOverride = new class'FunctionOverride';
 	FactoryGenerateOverride.Init(class'Factory', 'GenerateActor', self, 'FactoryGenerateActor');
+	TriggerRelevantOverride = new class'FunctionOverride';
+	TriggerRelevantOverride.Init(class'Trigger', 'IsRelevant', self, 'TriggerIsRelevant');
+	CounterTriggerOverride = new class'FunctionOverride';
+	CounterTriggerOverride.Init(class'Counter', 'Trigger', self, 'CounterTrigger');
+	AttachmentEffectsOverride = new class'FunctionOverride';
+	AttachmentEffectsOverride.Init(class'WeaponAttachment', 'ThirdPersonEffects', self, 'AttachmentThirdPersonEffects');
+	AttachmentBeginOverride = new class'FunctionOverride';
+	AttachmentBeginOverride.Init(class'WeaponAttachment', 'PostNetBeginPlay', self, 'AttachmentPostNetBeginPlay');
+	AddTurretFire(class'Weapon');
+	AddTurretFire(class<Weapon>(DynamicLoadObject("CTInventory.EWebTurret", class'Class')));
+	AddTurretFire(class<Weapon>(DynamicLoadObject("CTInventory.GunshipTurret", class'Class')));
+	AddTurretFire(class<Weapon>(DynamicLoadObject("CTInventory.MissileTurret", class'Class')));
+	AddTurretFire(class<Weapon>(DynamicLoadObject("CTInventory.ATTEWalkerTurret", class'Class')));
+	WeaponSetOverride = new class'FunctionOverride';
+	WeaponSetOverride.Init(class'Weapon', 'ClientWeaponSet', self, 'WeaponClientWeaponSet');
+
+	AddActionForward(class'ACTION_PlayMusic');
+	AddActionForward(class'ACTION_SetImuseState');
+	AddActionForward(class'ACTION_ForceBattleMusic');
+	AddActionForward(class'ACTION_ForceVictoryFlourish');
+	AddActionForward(class'ACTION_SetBattleMusicMulti');
+	AddActionForward(class'ACTION_DisplayMessage');
+	AddActionForward(class'ACTION_AnimateVisorFX');
+	AddActionForward(class'ACTION_ShowVisor');
+	AddActionForward(class'ACTION_ShowPrompt');
+	AddActionForward(class'ACTION_ConsoleCommand');
+	AddActionForward(class'ACTION_ChangeZoneAudio');
+	AddActionForward(class'ACTION_ShowMarker');
+	AddActionForward(class'ACTION_ShowTitleCardScreen');
+	AddActionForward(class'ACTION_ShowMenuScreen');
+}
+
+function AddTurretFire(class<Weapon> WeaponClass)
+{
+	local CoopTurretFire Fire;
+
+	Fire = new class'CoopTurretFire';
+	Fire.Init(WeaponClass);
+	TurretFires[TurretFires.Length] = Fire;
+}
+
+function AddActionForward(class<ScriptedAction> ActionClass)
+{
+	local CoopActionForward Forward;
+
+	Forward = new class'CoopActionForward';
+	Forward.Init(ActionClass);
+	ActionForwards[ActionForwards.Length] = Forward;
 }
 
 /*
@@ -189,7 +244,8 @@ simulated function DestroyLocalTurret(Pawn Turret)
 /*
  * The target selection of the player (native CTPlayer.SelectTargetType) asks a panel whether the player has the required inventory.
  * ActivateItem.HasRequiredInventory is not simulated: on clients, where panels are proxies, it was not executed and returned false,
- * so clients could never target a panel (bacta dispensers, hacking, explosives). Same code, but simulated.
+ * so clients could never target a panel (bacta dispensers, hacking, explosives). Same code, but simulated, and a player's squad member
+ * only gets the panels of its specialty.
  */
 simulated function bool ActivateItemHasRequiredInventory(Pawn P)
 {
@@ -197,6 +253,10 @@ simulated function bool ActivateItemHasRequiredInventory(Pawn P)
 	local Ammunition AmmoType;
 
 	Item = ActivateItem(HasRequiredInventoryOverride.CurrentSelf);
+
+	// The specialty of the squad member a player plays (see CoopGame.MemberCanUse)
+	if(!class'CoopGame'.static.MemberCanUse(P, Item))
+		return false;
 
 	if(Item.AmmunitionRequired == None)
 		return true;
@@ -441,6 +501,173 @@ function bool FactoryPlayerRangeTest(vector Location)
 	return false;
 }
 
+/*
+ * Triggers of the squad (TT_SquadMemberProximity) only count pawns of the player's squad. The members the clients play are taken out
+ * of the AI squad, so these triggers never saw them (YYY_01B: SquadInTrap waits for the 4 commandos in the clearing and enables the
+ * demolition marker of the hatch; it never came). Same code, the commandos of the clients count too.
+ * Triggers of the player's class (TT_ClassProximity with PlayerCommando, YYY_04B: the reinforcements, the wookiee jump and the last
+ * trandoshans) only saw the host: a client playing a Delta member has that member's class. The commandos of the clients count too.
+ * A survey of all campaign maps found no other trigger, counter or marker that counts the squad or the players.
+ */
+function bool TriggerIsRelevant(Actor Other)
+{
+	local Trigger T;
+
+	T = Trigger(TriggerRelevantOverride.CurrentSelf);
+
+	// See CoopEndLift: it starts when the squad is on the lift, not with the first one who touches this trigger
+	if(CoopGame(T.Level.Game) != None && CoopGame(T.Level.Game).EndLift != None && CoopGame(T.Level.Game).EndLift.IsHeld(T))
+		return false;
+
+	if(T.bInitiallyActive && Pawn(Other) != None && CoopPlayer(Pawn(Other).Controller) != None && Pawn(Other).IsA('CloneCommando'))
+	{
+		if(T.TriggerType == TT_SquadMemberProximity)
+			return true;
+
+		if(T.TriggerType == TT_ClassProximity && ClassIsChildOf(T.ClassProximityType, class'PlayerCommando'))
+		{
+			if(!T.IsRelevant(Other))
+				Log("CoopGame: trigger " $ T $ " of the player's class counts " $ Other $ " of a client");
+
+			return true;
+		}
+	}
+
+	return T.IsRelevant(Other);
+}
+
+/*
+ * Diagnostics: levels wait for counters (GEO_03D: the control room door waits for two droids and the hacked computer, it never
+ * opened in a co-op run and the log couldn't tell which one was missing). Every count is logged on the server.
+ */
+function CounterTrigger(Actor Other, Pawn EventInstigator)
+{
+	local Counter C;
+
+	C = Counter(CounterTriggerOverride.CurrentSelf);
+
+	if(C.NumToCount > 0)
+		Log("CoopGame: counter " $ C.Tag $ " got " $ Other $ " (instigator " $ EventInstigator $ "), " $ (C.NumToCount - 1) $ " left before " $ C.Event);
+
+	C.Trigger(Other, EventInstigator);
+}
+
+/*
+ * Weapon attachments play the multiplayer animations on the pawn of another player (DC17mMeleeAttack, DC17mFire, DC17Load...).
+ * Single player blanks these names in PostNetBeginPlay (NM_Standalone only), the pawns of the campaign have none of them.
+ * - The commandos of co-op use the single player animation set ("PlayAnim: Sequence 'DC17mMeleeAttack' not found" in the clients'
+ *   logs): the melee attack, throws, reloads and weapon changes of the host and of other clients weren't seen. The names are
+ *   replaced by the single player animations; the fire animation is left to Pawn.SelectFireAnim.
+ * - Other pawns (droids, geonosians, trandoshans, troopers, gunships: "DC17Load", "ShotgunFire", "EliteBeamFire" not found on the
+ *   host and the clients) get the blank names like in single player, their AI plays its own animations.
+ * Other pawns get it when the attachment is spawned and again before its first effect (the owner may only be known then),
+ * commandos before their first effect.
+ */
+simulated function AttachmentPostNetBeginPlay()
+{
+	local WeaponAttachment WA;
+
+	WA = WeaponAttachment(AttachmentBeginOverride.CurrentSelf);
+	WA.PostNetBeginPlay();
+
+	// Commandos only before their first effect, like 0.61: done at the spawn, the blank breathe name made the host's commando play
+	// ActionBreathe over its waiting animation in the GEO_03A briefing (session 2026-10-31)
+	if(Pawn(WA.Owner) != None && !Pawn(WA.Owner).IsA('CloneCommando'))
+		UseCampaignAnims(WA);
+}
+
+simulated function AttachmentThirdPersonEffects()
+{
+	local WeaponAttachment WA;
+
+	WA = WeaponAttachment(AttachmentEffectsOverride.CurrentSelf);
+
+	if(WA.Instigator == None && Pawn(WA.Owner) != None)
+		WA.Instigator = Pawn(WA.Owner);
+
+	UseCampaignAnims(WA);
+	WA.ThirdPersonEffects();
+}
+
+simulated function bool MissingAnim(Pawn P, name Anim)
+{
+	return Anim != '' && !P.HasAnim(Anim);
+}
+
+simulated function UseCampaignAnims(WeaponAttachment WA)
+{
+	local Pawn P;
+
+	P = WA.Instigator;
+
+	if(P == None)
+		P = Pawn(WA.Owner);
+
+	if(P == None || WA.Level.NetMode == NM_Standalone || P.IsA('MPPawn'))
+		return;
+
+	if(!MissingAnim(P, WA.MPPawnFireAnim) && !MissingAnim(P, WA.MPPawnLoadAnim) && !MissingAnim(P, WA.MPPawnMeleeAnim) &&
+	   !MissingAnim(P, WA.MPPawnBreatheAnim) && !MissingAnim(P, WA.MPPawnThrowAnim) && !MissingAnim(P, WA.MPPawnHolsterAnim))
+		return;
+
+	if(P.IsA('CloneCommando'))
+	{
+		WA.MPPawnFireAnim = '';
+		WA.MPPawnMeleeAnim = SPAnim(P, 'MeleeAttack');
+		WA.MPPawnThrowAnim = SPAnim(P, 'ThrowGrenade');
+		WA.MPPawnLoadAnim = SPAnim(P, 'Load');
+		WA.MPPawnHolsterAnim = SPAnim(P, 'Holster');
+		WA.MPPawnBreatheAnim = '';
+		WA.MPPawnIdleAnim = '';
+		Log("ModCoop: single player animations for " $ WA $ " of " $ P $ ": melee " $ WA.MPPawnMeleeAnim $ ", throw " $ WA.MPPawnThrowAnim);
+		return;
+	}
+
+	WA.MPPawnBreatheAnim = '';
+	WA.MPPawnFireAnim = '';
+	WA.MPPawnHolsterAnim = '';
+	WA.MPPawnLoadAnim = '';
+	WA.MPPawnIdleAnim = '';
+	WA.MPPawnMeleeAnim = '';
+	WA.MPPawnThrowAnim = '';
+}
+
+// See CoopPlayer.ClientCoopWeaponsQuiet: a weapon given while the server equips this client's pawn doesn't switch the weapon
+simulated function WeaponClientWeaponSet(bool bOptionalSet)
+{
+	local Weapon W;
+	local Pawn P;
+	local CoopPlayer CP;
+
+	W = Weapon(WeaponSetOverride.CurrentSelf);
+	P = Pawn(W.Owner);
+
+	if(P != None && W.Level.NetMode == NM_Client)
+	{
+		CP = CoopPlayer(W.Level.GetLocalPlayerController());
+
+		if(CP != None && CP.bQuietWeaponSet && (P.Controller == CP || P.Controller == None))
+		{
+			W.Instigator = P;
+
+			if(W.IsInState('PendingClientWeaponSet'))
+				W.GotoState('');
+
+			return;
+		}
+	}
+
+	W.ClientWeaponSet(bOptionalSet);
+}
+
+simulated function name SPAnim(Pawn P, name AnimName)
+{
+	if(P.HasAnim(AnimName))
+		return AnimName;
+
+	return '';
+}
+
 function bool FactoryIsLocationCovert(vector LocationToTest)
 {
 	local Factory F;
@@ -552,6 +779,10 @@ function bool FactoryGenerateActor()
 				bSpawnOK = F.SetupNewActor(F.SpawnedActors[0], F.SpawnPoints[F.NextSpawnPoint]);
 			}
 		}
+
+		// Effects of FXFactories (GEO_03A: the explosion of the jamming device, StartFX and MainFX) exist on the server only
+		if(F.SpawnedActors[0] != None && Emitter(F.SpawnedActors[0]) != None && F.SpawnedActors[0].RemoteRole == ROLE_None && CoopGame(F.Level.Game) != None)
+			CoopGame(F.Level.Game).ForwardEffect(class<Emitter>(F.SpawnedActors[0].Class), F.SpawnedActors[0].Location, F.SpawnedActors[0].Rotation, None);
 
 		if(bSpawnOK && !F.bGenerateForever)
 			F.RemainingItems--;
