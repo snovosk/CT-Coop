@@ -6,15 +6,20 @@ class CoopEndLift extends Object;
  *   host steps in and the next level loads at the top: clients and squad members were left behind (GEO_05B, checklist 2026-11-01).
  *   The trigger is held back until all players and all squad members that can walk stand on the lift. Players who are missing get a
  *   hint with their number; squad members the AI plays are put on the lift if they aren't there soon after the last player.
- * Entry points: Setup (CoopGame, when the level starts), IsHeld (CoopExtension.TriggerIsRelevant), Check (CoopGame, every second).
- * Logging: "CoopGame: end lift" (found, waiting, members put on it, started).
- * State: Game, Gate, Lift, bStarted, PlayersAboardTime, NextHint, LastMissing.
+ *   The lifts inside a level (GEO_05A, GEO_05B) start with the first player: a client who came first left the host behind with no way up (GEO_05A,
+ *   session 2026-11-02). IsSharedLift names them, CoopGame.CheckLiftRides brings the other players to whoever rides. Their triggers cover only a part
+ *   of the car (GEO_05A Lift01: the far wall), a client stood on the car and nothing happened (session 2026-11-02): standing on the car starts them too.
+ * Entry points: Setup (CoopGame, when the level starts), IsHeld (CoopExtension.TriggerIsRelevant), Check (CoopGame, every second), IsSharedLift (CoopGame).
+ * Logging: "CoopGame: end lift" (found, waiting, members put on it, started), "CoopGame: shared lift".
+ * State: Game, Gate, Lift, bStarted, PlayersAboardTime, NextHint, LastMissing, SharedLifts.
+ * Logging also: "CoopGame: shared lift ... started" when standing on the car started it.
  * Known limitations: a table of maps. YYY_06C isn't in it: its Elevator is triggered from another room, players don't ride it. A player who
  *   is down on the way holds the lift until somebody revives them, like the start of the level holds nobody.
  */
 
 const HINT_INTERVAL = 4.0;
 const MEMBER_WAIT = 10.0;
+const SHARED_LIFT_STAND = 1.5;
 
 var CoopGame Game;
 var Trigger Gate;
@@ -22,6 +27,15 @@ var Mover Lift;
 var bool bStarted;
 var float PlayersAboardTime, NextHint;
 var int LastMissing;
+struct SharedLift
+{
+	var Mover Lift;
+	var Trigger Gate;
+	var float StandTime;
+	var bool bDone;
+};
+
+var array<SharedLift> SharedLifts;
 
 function Setup(CoopGame G, string MapName)
 {
@@ -30,6 +44,7 @@ function Setup(CoopGame G, string MapName)
 	local Mover M;
 
 	Game = G;
+	FindSharedLifts(MapName);
 
 	if(MapName ~= "GEO_05B")
 	{
@@ -57,6 +72,99 @@ function Setup(CoopGame G, string MapName)
 		Gate = None;
 
 	Log("CoopGame: end lift " $ Lift $ " held by " $ Gate);
+}
+
+// The lifts inside a level, from the map dumps. Only these: a client on any other slow mover (the droid racks of GEO_05A) must not move the host.
+// Lift00 of GEO_05A isn't one: everybody starts on it with the host
+function FindSharedLifts(string MapName)
+{
+	if(MapName ~= "GEO_05A")
+	{
+		AddSharedLift('Lift01', 'Lift01Lockdown');
+		AddSharedLift('Lift03', 'Lift03Lockdown');
+		AddSharedLift('Lift04', 'Lift04Lockdown');
+	}
+	else if(MapName ~= "GEO_05B")
+		AddSharedLift('Lift00', 'Lift00Lockdown');
+}
+
+function AddSharedLift(name LiftTag, name GateEvent)
+{
+	local Mover M;
+	local Trigger T;
+	local int i;
+
+	foreach Game.AllActors(class'Mover', M, LiftTag)
+	{
+		i = SharedLifts.Length;
+		SharedLifts.Length = i + 1;
+		SharedLifts[i].Lift = M;
+
+		foreach Game.AllActors(class'Trigger', T)
+		{
+			if(T.Event == GateEvent)
+				SharedLifts[i].Gate = T;
+		}
+
+		Log("CoopGame: shared lift " $ M $ " (" $ LiftTag $ ") gate " $ SharedLifts[i].Gate);
+	}
+}
+
+function bool IsSharedLift(Mover M)
+{
+	local int i;
+
+	for(i = 0; i < SharedLifts.Length; i = i + 1)
+	{
+		if(SharedLifts[i].Lift == M)
+			return true;
+	}
+
+	return false;
+}
+
+// Once per lift: a car that has moved is left alone, standing on it at the top must not send it back
+function CheckSharedLifts()
+{
+	local Controller C;
+	local Pawn Rider;
+	local int i;
+
+	for(i = 0; i < SharedLifts.Length; i = i + 1)
+	{
+		if(SharedLifts[i].bDone)
+			continue;
+
+		if(SharedLifts[i].Lift.bInterpolating || SharedLifts[i].Lift.KeyNum != 0)
+		{
+			SharedLifts[i].bDone = true;
+			continue;
+		}
+
+		Rider = None;
+
+		for(C = Game.Level.ControllerList; C != None; C = C.nextController)
+		{
+			if(PlayerController(C) != None && C.Pawn != None && C.Pawn.Health > 0 && !C.Pawn.bIncapacitated && C.Pawn.Base == SharedLifts[i].Lift)
+				Rider = C.Pawn;
+		}
+
+		if(Rider == None || SharedLifts[i].Gate == None || !SharedLifts[i].Gate.bInitiallyActive)
+		{
+			SharedLifts[i].StandTime = 0;
+			continue;
+		}
+
+		if(SharedLifts[i].StandTime == 0)
+			SharedLifts[i].StandTime = Game.Level.TimeSeconds;
+
+		if(Game.Level.TimeSeconds - SharedLifts[i].StandTime >= SHARED_LIFT_STAND)
+		{
+			Log("CoopGame: shared lift " $ SharedLifts[i].Lift $ " started by " $ Rider $ " standing on it");
+			SharedLifts[i].bDone = true;
+			SharedLifts[i].Gate.TriggerEvent(SharedLifts[i].Gate.Event, SharedLifts[i].Gate, Rider);
+		}
+	}
 }
 
 function bool IsHeld(Trigger T)
@@ -99,6 +207,8 @@ function Check()
 	local bool bHostSeen;
 	local string Hint;
 	local color HintColor;
+
+	CheckSharedLifts();
 
 	// Squad members in formation walk off again, the lift doesn't wait for that (GEO_04D)
 	if(bStarted)

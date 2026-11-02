@@ -43,6 +43,7 @@ var array<Actor> WatchHiddenActors;
 var vector      WatchCameraLocation;
 var rotator     WatchCameraRotation;
 var float       WatchCameraTime;
+var array<Pawn> SnipeKeptOff;         // See KeepOthersFromSnipe
 var bool        bWatchFocus;          // Client only: the scene camera looks at WatchFocus (a door breach)
 var vector      WatchFocus;
 var Pawn        WatchCameraPawn;      // Client only: squad member whose scene the camera shows (see CalcWatchView)
@@ -69,6 +70,12 @@ var vector      BlockCheckLocation;   // Client only: see CheckBlocked
 var float       BlockCheckTime;
 var float       NextBlockLog;
 var float       NextCorrectionLog;
+var float       NextCameraLog;
+var float       LastOnCarTime;        // Server, see CoopGame.StaysOnCar
+var float       UsingItemStart;       // See LongClientAdjustPosition
+const USE_CORRECTION_GRACE = 1.0;
+const TURRET_USE_RANGE = 260.0;
+const TURRET_USE_AIM = 0.6;
 var float       HandSignalActiveTime; // Client only: see FixHandSignalWeapon
 var float       HandSignalIdleTime;   // Client only: see FixHandSignalWeapon
 var bool        bPlayedHandSignalAnim;
@@ -780,6 +787,14 @@ function LongClientAdjustPosition(float TimeStamp, name newState, EPhysics newPh
 		}
 	}
 
+	// A correction sent before the server heard of the use key threw the client out of UsingItem with the key still held: its EndState also stopped
+	// the server, 9 of 36 uses of a panel or a revive failed in the session of 2026-11-02 and had to be pressed again. The server follows in a moment.
+	if(newState == 'PlayerWalking' && IsInState('UsingItem') && bUse && Level.TimeSeconds - UsingItemStart < USE_CORRECTION_GRACE)
+	{
+		Log("ModCoop: use kept: the server's correction said PlayerWalking " $ (Level.TimeSeconds - UsingItemStart) $ " s after the key");
+		newState = 'UsingItem';
+	}
+
 	Super.LongClientAdjustPosition(TimeStamp, newState, newPhysics, NewLocX, NewLocY, NewLocZ, NewVelX, NewVelY, NewVelZ, NewBase, NewFloorX, NewFloorY, NewFloorZ);
 }
 
@@ -1344,6 +1359,27 @@ simulated function LogCommandos()
 	}
 }
 
+// The weapons in the pawn's inventory: a client saw two sets of them (session 2026-11-02), which side has them wasn't in the logs. See also CoopGame.RemoveDuplicateWeapons
+simulated function string WeaponList()
+{
+	local Inventory Inv;
+	local string Text;
+	local int Guard;
+
+	if(Pawn == None)
+		return "";
+
+	for(Inv = Pawn.Inventory; Inv != None && Guard < 40; Inv = Inv.Inventory)
+	{
+		Guard = Guard + 1;
+
+		if(Weapon(Inv) != None)
+			Text = Text $ " " $ Inv.Class.Name;
+	}
+
+	return Text;
+}
+
 simulated function LogClientStatus()
 {
 	if(Level.TimeSeconds < NextStatusLog)
@@ -1361,7 +1397,7 @@ simulated function LogClientStatus()
 	Log("ModCoop: Status: State=" $ GetStateName() $ " Pawn=" $ Pawn.Class.Name $ " Health=" $ Pawn.Health $ " Incap=" $ Pawn.bIncapacitated $ " Physics=" $ Pawn.Physics $
 	    " Loc=" $ Pawn.Location $ " Weapon=" $ Pawn.Weapon $ " WeaponState=" $ Pawn.Weapon.GetStateName() $ " Pending=" $ Pawn.PendingWeapon $
 	    " Grenade=" $ Pawn.CurrentGrenade $ " Target=" $ Target $ " TargetType=" $ TargetType $ " ViewTarget=" $ ViewTarget $ " BehindView=" $ bBehindView $
-	    " Ping=" $ PlayerReplicationInfo.Ping);
+	    " Ping=" $ PlayerReplicationInfo.Ping $ " Weapons:" $ WeaponList());
 }
 
 function ServerCoopSetTarget(Actor NewTarget, ETargetType NewTargetType)
@@ -1418,6 +1454,8 @@ exec function Use()
 	local ActivateItem Item;
 	local Turret T;
 
+	LogUse("pressed");
+
 	// Door breaches wait for the clients of the squad (see CoopGame.OrderDoorBreach)
 	if(IsCoopHost() && CoopGame(Level.Game) != None && (TargetType == TGT_Marker || TargetType == TGT_MarkerCancel) &&
 	   CoopGame(Level.Game).OrderDoorBreach(self, TargetMarker, TargetType == TGT_MarkerCancel))
@@ -1464,21 +1502,172 @@ exec function Use()
 		}
 	}
 
+	KeepOthersFromSnipe(true);
 	Super.Use();
+	KeepOthersFromSnipe(false);
+	LogUse("done");
 }
 
-// Client: see Use
+/*
+ * HACK: the sniper position of GEO_01C goes to whoever the marker picks first, with the squad following the host that can be Fixer: he stood on the
+ * position while Sev stayed behind (user's run 2026-11-02). While the order is executed the other AI members are out of the squad, Sev is
+ * the only one to choose, they are back in the same call. Remove it if the marker's choice can be set another way.
+ */
+function KeepOthersFromSnipe(bool bKeep)
+{
+	local Pawn P, Sev;
+	local int i;
+
+	if(!bKeep)
+	{
+		for(i = 0; i < SnipeKeptOff.Length; i = i + 1)
+		{
+			if(SnipeKeptOff[i] != None && !SnipeKeptOff[i].bDeleteMe && Pawn != None && Pawn.Squad != None)
+				Pawn.Squad.AddToSquad(SnipeKeptOff[i]);
+		}
+
+		if(SnipeKeptOff.Length > 0)
+			Log("ModCoop: sniper order done, marker " $ TargetMarker $ " active " $ TargetMarker.bMarkerActive $ " participants " $ TargetMarker.Participants[0].Member $ "," $ TargetMarker.Participants[1].Member $ "," $ TargetMarker.Participants[2].Member);
+
+		SnipeKeptOff.Length = 0;
+		return;
+	}
+
+	if(!IsCoopHost() || Pawn == None || Pawn.Squad == None || TargetType != TGT_Marker || TargetMarker == None || TargetMarker.Tag != 'BalconyMarkerSnipe')
+		return;
+
+	foreach DynamicActors(class'Pawn', P)
+	{
+		if(P.IsA('Commando07Delta') && P.Squad == Pawn.Squad && AIController(P.Controller) != None && P.Health > 0 && !P.bIncapacitated)
+			Sev = P;
+	}
+
+	if(Sev == None)
+		return;
+
+	foreach DynamicActors(class'Pawn', P)
+	{
+		if(P != Sev && P != Pawn && P.Squad == Pawn.Squad && AIController(P.Controller) != None)
+			SnipeKeptOff[SnipeKeptOff.Length] = P;
+	}
+
+	for(i = 0; i < SnipeKeptOff.Length; i = i + 1)
+		Pawn.Squad.RemoveFromSquad(SnipeKeptOff[i]);
+
+	Log("ModCoop: sniper order for " $ Sev $ ", " $ SnipeKeptOff.Length $ " others kept off");
+}
+
+/*
+ * Squad orders that don't work for testers (GEO_01C: Sev doesn't go to the sniper position, the host only sees the squad commands): what the
+ * player targeted when pressing Use, what the marker and the squad said, and the squad commands before it.
+ * Logging: "ModCoop: use", "ModCoop: squad command"; the bot's failure is the engine's "Marker goal ... failed".
+ */
+simulated function LogUse(string Step)
+{
+	local string Text;
+	local Squad S;
+	local Pawn P;
+	local SquadMarker M;
+
+	Text = "ModCoop: use " $ Step $ ": TargetType=" $ TargetType $ " Target=" $ Target $ " State=" $ GetStateName();
+
+	if(TargetMarker != None)
+		Text = Text $ " Marker=" $ TargetMarker $ " tag=" $ TargetMarker.Tag $ " class=" $ TargetMarker.Class.Name $ " state=" $ TargetMarker.GetStateName() $ " visible=" $ TargetMarker.AlwaysVisible $ " active=" $ TargetMarker.bMarkerActive $ " complete=" $ TargetMarker.bComplete $ " usability=" $ TargetMarker.GetMarkerUsability(Pawn);
+
+	if(Pawn != None)
+	{
+		S = Pawn.Squad;
+		Text = Text $ " Pawn=" $ Pawn.Class.Name $ " Squad=" $ S;
+
+		if(S != None)
+			Text = Text $ " leader=" $ (S.SquadLeader == Pawn) $ " alive=" $ S.CountAliveMembers() $ " stance=" $ S.Stance;
+	}
+
+	Log(Text);
+
+	// What may keep the squad occupied: its members and the markers that are active
+	if(Step == "pressed" && Role == ROLE_Authority && TargetMarker != None && S != None)
+	{
+		foreach DynamicActors(class'Pawn', P)
+		{
+			if(P.Squad == S && P != Pawn)
+				Log("ModCoop: use member " $ P.Class.Name $ " marker=" $ P.SquadMarker $ " controller=" $ P.Controller.Class.Name $ "/" $ P.Controller.GetStateName() $ " health=" $ P.Health $ " incap=" $ P.bIncapacitated);
+		}
+
+		foreach AllActors(class'SquadMarker', M)
+		{
+			if(M.bMarkerActive)
+				Log("ModCoop: use active marker " $ M $ " state=" $ M.GetStateName() $ " complete=" $ M.bComplete $ " participants=" $ M.TotalParticipants $ " members=" $ M.Participants[0].Member $ "," $ M.Participants[1].Member $ "," $ M.Participants[2].Member);
+		}
+	}
+}
+
+exec function SetStanceOffensive()
+{
+	Log("ModCoop: squad command F1 search and destroy");
+	Super.SetStanceOffensive();
+}
+
+exec function SetStanceDefensive()
+{
+	Log("ModCoop: squad command F2 form up");
+	Super.SetStanceDefensive();
+}
+
+exec function SquadEngage()
+{
+	Log("ModCoop: squad command F3 secure position");
+	Super.SquadEngage();
+}
+
+exec function CancelAllMarkers()
+{
+	Log("ModCoop: squad command F4 recall");
+	Super.CancelAllMarkers();
+}
+
+// See Use and SelectTargetType. The traces start at the eyes: the pawn's center is often behind the turret's own base
 simulated function Turret FindNearTurret()
 {
 	local Turret T;
 
-	foreach VisibleCollidingActors(class'Turret', T, 200, Pawn.Location)
+	foreach CollidingActors(class'Turret', T, TURRET_USE_RANGE, Pawn.Location)
 	{
-		if(!T.IsA('AutoTurret') && (T.Gunner == None || T.Gunner.Health <= 0) && (Normal(T.Location - Pawn.Location) dot vector(Rotation)) > 0.3)
+		if(!T.IsA('AutoTurret') && (T.Gunner == None || T.Gunner.Health <= 0) && (Normal(T.Location - Pawn.Location) dot vector(Rotation)) > TURRET_USE_AIM &&
+		   FastTrace(T.Location, Pawn.Location + Pawn.EyePosition()))
 			return T;
 	}
 
 	return None;
+}
+
+/*
+ * The game only offers a turret when the crosshair is nearly inside its model: testers had to walk into it (session 2026-11-02). Looking
+ * towards a free turret close by is enough now, for the prompt and for Use. Nothing else the player could target gets replaced.
+ */
+simulated event ETargetType SelectTargetType()
+{
+	local ETargetType Found;
+	local Turret T;
+
+	Found = Super.SelectTargetType();
+
+	// A turret with a marker is an order for the squad, not for a client: Use did nothing until the player stood right at it (GEO_04A, test turretnear)
+	if(Pawn != None && Found == TGT_Marker && Turret(Target) != None && (Pawn.Squad == None || Pawn.Squad.SquadLeader != Pawn))
+		Found = TGT_Default;
+
+	if(Pawn != None && IsInState('PlayerWalking') && (Found == TGT_Default || Found == TGT_Pickup || Found == TGT_KarmaProp))
+	{
+		T = FindNearTurret();
+
+		if(T != None && (Level.NetMode == NM_Client || T.IsAvailableFor(Pawn)))
+		{
+			Target = T;
+			return TGT_MountTurret;
+		}
+	}
+
+	return Found;
 }
 
 /*
@@ -1984,6 +2173,14 @@ event PlayerCalcView(out actor ViewActor, out vector CameraLocation, out rotator
 	{
 		CalcWatchView(ViewActor, CameraLocation, CameraRotation);
 
+		// The camera of a client flies up after a lift (session 2026-11-02), the logs couldn't tell why
+		if(Pawn != None && ViewTarget == Pawn && !bBehindView && TakeoverStartTime == 0 && Level.TimeSeconds >= NextCameraLog &&
+		   (Abs(Pawn.EyeHeight - Pawn.BaseEyeHeight) > 40 || VSize(CameraLocation - Pawn.Location) > 150))
+		{
+			NextCameraLog = Level.TimeSeconds + 1;
+			Log("ModCoop: camera off the eyes: camera " $ CameraLocation $ " pawn " $ Pawn.Location $ " EyeHeight=" $ Pawn.EyeHeight $ " Base=" $ Pawn.Base $ " Physics=" $ Pawn.Physics $ " State=" $ GetStateName());
+		}
+
 		// Looking through another pawn: at what is drawn (see SmoothProxies), the scene camera is smoothed itself
 		if(WatchCameraPawn == None && Pawn(ViewTarget) != None && ViewTarget != Pawn)
 			CameraLocation += ViewTarget.PrePivot;
@@ -2068,6 +2265,34 @@ simulated function EndBlendToEyes()
 }
 
 /*
+ * A level started in the level's briefing hasn't brought the weapon up (Briefing doesn't allow switching): it isn't attached to the pawn. Single player
+ * never shows that, the lift view shows the host's body (GEO_03A: empty hands, session 2026-11-02). The end of the briefing brings it up in
+ * first person as usual.
+ */
+function ShowHostWeaponInLift()
+{
+	Log("ModCoop: host weapon in the lift: " $ Pawn.Weapon $ " pending " $ Pawn.PendingWeapon);
+
+	if(Pawn.Weapon == None)
+	{
+		bOkToSwitchWeapon = true;
+		SwitchToBestWeapon();
+		bOkToSwitchWeapon = false;
+	}
+
+	if(Pawn.Weapon == None)
+		return;
+
+	if(Pawn.Weapon.ThirdPersonActor == None || Pawn.Weapon.ThirdPersonActor.Base != Pawn)
+		Pawn.Weapon.AttachToPawn(Pawn);
+
+	if(Pawn.Weapon.ThirdPersonActor != None)
+		Pawn.Weapon.ThirdPersonActor.bHidden = false;
+
+	Log("ModCoop: host weapon in the lift now: " $ Pawn.Weapon $ " attachment " $ Pawn.Weapon.ThirdPersonActor $ " base " $ Pawn.Weapon.ThirdPersonActor.Base);
+}
+
+/*
  * The host stood still in the briefing (GEO_03A: the elevator) while the squad around it played its animations. In the lift view it
  * plays a relaxed waiting loop, on the host and on the clients (sent like an animation of a level script, once to every client, also
  * to the ones that join during the scene).
@@ -2099,6 +2324,8 @@ function SetHostWaitAnim(bool bOn)
 		Pawn.LoopAnim(HostWaitAnim);
 		Log("ModCoop: the host waits with " $ HostWaitAnim);
 		SendHostWaitAnim();
+
+		ShowHostWeaponInLift();
 		return;
 	}
 
@@ -3078,7 +3305,8 @@ simulated function ApplyHideRiders()
 
 	foreach DynamicActors(class'Pawn', P)
 	{
-		if(P.PlayerReplicationInfo == None && P != Pawn)
+		// GEO_05C: the level starts on a lift, the host's PRI hadn't arrived and the host stayed visible, the players stood in each other (session 2026-11-02)
+		if(P.PlayerReplicationInfo == None && P != Pawn && !P.IsA('PlayerCommando') && !P.IsA('CoopCommando'))
 			continue;
 
 		bHideThis = bHideRiders && P != Pawn;
@@ -3380,6 +3608,7 @@ state UsingItem
 	function BeginState()
 	{
 		Super.BeginState();
+		UsingItemStart = Level.TimeSeconds;
 
 		// Not when the server's position correction put us back into this state after the use key was released (see PlayerTick)
 		if(Role < ROLE_Authority && bUse)

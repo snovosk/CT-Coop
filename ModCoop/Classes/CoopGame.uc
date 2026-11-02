@@ -43,6 +43,9 @@ var SquadMarker TestMarker;
 var bool    bTestResSet;
 var string  TestEvents;
 var string  TestCauses;
+var float   NextTestOrderStep, TestOrderTime;
+var int     TestOrderStage;
+var bool    bTestBreachOrdered, bTestBreachDone;
 var float   NextTestCause;
 var float   NextTestEvent;
 var int     TestChainStage;
@@ -126,6 +129,10 @@ var int                TestSubStep;
 var Mover              LastRideLift;        // See HostLift
 var float              LastRideMoveTime, LastRideSeenTime;
 var bool               bRidersHidden;       // See HideRiders
+var PlayerController   RideLeader;          // See CheckLiftRides: the player the others are brought to
+var float              RideEndTime;         // See RidersApart
+const RIDE_GHOST_TIME = 10.0;
+const RIDE_APART_DISTANCE = 100.0;
 var array<Actor>       RideHiddenActors;
 var array<string>      SceneMaps;           // See InStartScene
 var array<name>        SceneEndEvents;
@@ -163,6 +170,9 @@ var array<SquadMarker> ClientSnipeMarkers; // See CheckClientSnipers: 1 entry pe
 var array<byte>        ClientSnipeStates;  // 1 = the client was asked to take the position, 2 = in position
 var float              NextSnipeTrackerTime;
 var bool  bWaitingForClients;    // See WaitForClients
+var SquadMarker StuckMarker;         // See CheckStuckBreachMarkers
+var float StuckMarkerTime;
+var SquadMarker LastActiveSnipeMarker; // See CheckAISnipeOrders
 var float NextSnipeOrderHint;       // See HintSnipeOrder
 var CoopSevIntro SevIntro;         // See CoopSevIntro
 var CoopEndLift EndLift;           // See CoopEndLift
@@ -192,6 +202,7 @@ var() config float MaxClientWait;  // Seconds the start of a level waits for the
 var SquadMarker GatherMarker;    // Door breach ordered by the host, waits until all clients playing squad members are at the door (see CheckGather)
 var float NextGatherMessage;
 
+const STUCK_MARKER_TIME = 5.0;
 const SNIPE_ORDER_HINT_INTERVAL = 8.0;
 const SNIPE_ORDER_HINT_TIME = 6.0;
 const GAME_CLASS = "ModCoop.CoopGame";
@@ -482,6 +493,122 @@ function GiveHostWeapons(Pawn P)
 		Log("CoopGame: weapons of the host added to " $ P $ ":" $ Added);
 }
 
+// Two weapons of one class in an inventory (session 2026-11-02: a client saw two sets, the source isn't known yet). The one in the hands stays
+function RemoveDuplicateWeapons(Pawn P)
+{
+	local Inventory A, B, Next;
+
+	for(A = P.Inventory; A != None; A = A.Inventory)
+	{
+		if(Weapon(A) == None)
+			continue;
+
+		for(B = A.Inventory; B != None; B = Next)
+		{
+			Next = B.Inventory;
+
+			if(B.Class == A.Class && B != P.Weapon && B != P.PendingWeapon)
+			{
+				Log("CoopGame: duplicate weapon " $ B.Class.Name $ " of " $ P $ " removed");
+				P.DeleteInventory(B);
+				B.Destroy();
+			}
+		}
+	}
+}
+
+// Test: a client on Lift01 (GEO_05A), away from its trigger, starts the lift, the host is brought to it, invisible for the client until they stand apart
+function TestHostLift(PlayerController Host)
+{
+	local Controller C;
+	local Trigger T, Gate;
+	local Mover M, Lift;
+
+	foreach AllActors(class'Trigger', T)
+	{
+		if(T.Event == 'Lift01Lockdown')
+			Gate = T;
+	}
+
+	foreach AllActors(class'Mover', M, 'Lift01')
+		Lift = M;
+
+	for(C = Level.ControllerList; C != None; C = C.nextController)
+	{
+		if(CoopPlayer(C) != None && !IsHost(C) && C.Pawn != None)
+			break;
+	}
+
+	if(Gate == None || Lift == None || C == None)
+	{
+		Log("CoopTest: hostlift: gate " $ Gate $ " lift " $ Lift $ " client " $ C);
+		return;
+	}
+
+	if(TestStep == 0)
+	{
+		C.Pawn.SetLocation(Lift.Location + vect(0,-10,210));
+		C.ClientSetLocation(C.Pawn.Location, C.Pawn.Rotation);
+	}
+
+	Log("CoopTest: hostlift: " $ TestStep $ " lift Z=" $ Lift.Location.Z $ " moving=" $ Lift.bInterpolating $ " client base=" $ C.Pawn.Base $ " Z=" $ C.Pawn.Location.Z $ " host base=" $ Host.Pawn.Base $ " Z=" $ Host.Pawn.Location.Z);
+}
+
+// Test: every player stands 220 units from the closest free turret and looks at it, the target has to be TGT_MountTurret
+function TestTurretNear(PlayerController Host)
+{
+	local Controller C;
+	local Turret T, Best;
+	local vector Offset;
+	local rotator R;
+	local int i;
+
+	foreach AllActors(class'Turret', T)
+	{
+		if(!T.IsA('AutoTurret') && (T.Gunner == None || T.Gunner.Health <= 0) && (Best == None || VSize(T.Location - Host.Pawn.Location) < VSize(Best.Location - Host.Pawn.Location)))
+			Best = T;
+	}
+
+	if(Best == None)
+	{
+		Log("CoopTest: turretnear: no turret");
+		return;
+	}
+
+	for(C = Level.ControllerList; C != None; C = C.nextController)
+	{
+		if(CoopPlayer(C) == None || C.Pawn == None)
+			continue;
+
+		if(TestStep == 0)
+		{
+			Offset = vect(220,0,0) >> Best.Rotation;
+			Offset.Z = 40;
+
+			if(i == 1)
+				Offset.Y = Offset.Y + 60;
+
+			Best.SquadMarker = None;
+			C.Pawn.SetLocation(Best.Location + Offset);
+			R = rotator(Best.Location - C.Pawn.Location);
+			C.SetRotation(R);
+			C.Pawn.SetRotation(R);
+			PlayerController(C).ClientSetRotation(R);
+
+			if(!IsHost(C))
+				PlayerController(C).ClientSetLocation(C.Pawn.Location, R);
+
+			i = i + 1;
+		}
+
+		// The client's rotation comes back from its moves, it has to turn on its side
+		if(!IsHost(C) && TestStep > 0 && TestStep < 4)
+			PlayerController(C).ClientSetRotation(rotator(Best.Location - C.Pawn.Location));
+
+		Log("CoopTest: turretnear: " $ TestStep $ " " $ C $ " " $ Best $ " dist " $ VSize(Best.Location - C.Pawn.Location) $ " Target=" $ PlayerController(C).Target $ " TargetType=" $ PlayerController(C).TargetType $ " state " $ C.GetStateName() $ " dot " $ (Normal(Best.Location - C.Pawn.Location) dot vector(C.Rotation)) $ " free " $ FastTrace(Best.Location, C.Pawn.Location + C.Pawn.EyePosition()) $ " available " $ Best.IsAvailableFor(C.Pawn));
+	}
+}
+
 function bool IsHost(Controller C)
 {
 	return PlayerController(C) != None && Viewport(PlayerController(C).Player) != None;
@@ -763,6 +890,10 @@ function Mover HostLift(PlayerController Host, optional bool bEvenStopped)
 
 	M = Mover(Host.Pawn.Base);
 
+	// A client only counts on the lifts inside a level, see CoopEndLift.FindSharedLifts
+	if(M != None && !IsHost(Host) && (EndLift == None || !EndLift.IsSharedLift(M)))
+		return None;
+
 	if(M == None)
 		return None;
 
@@ -870,7 +1001,6 @@ function HideRiders(bool bHide)
 {
 	local Controller C;
 	local Pawn P;
-	local vector Spot;
 
 	if(bHide == bRidersHidden)
 		return;
@@ -891,16 +1021,6 @@ function HideRiders(bool bHide)
 		if(!IsHost(C) && bHide)
 			HidePawnParts(P, RideHiddenActors);
 
-		// Off the shared spot before they block each other again
-		if(!bHide && !IsHost(C) && GetHost() != None && GetHost().Pawn != None && VSize(P.Location - GetHost().Pawn.Location) < 100)
-		{
-			if((LastRideLift != None && FindLiftSpot(GetHost().Pawn, LastRideLift, Spot)) || FindSpawnLocation(GetHost().Pawn.Location, GetHost().Pawn.Rotation, Spot))
-			{
-				P.SetLocation(Spot);
-				C.ClientSetLocation(Spot, C.Rotation);
-			}
-		}
-
 		if(bHide)
 			P.SetCollision(P.bCollideActors, false, false);
 		else
@@ -913,6 +1033,44 @@ function HideRiders(bool bHide)
 			CoopPlayer(C).ClientCoopHideRiders(bHide);
 		}
 	}
+}
+
+// After a ride everybody walks off the shared spot as usual: invisible and without collision until the players stand apart (at most RIDE_GHOST_TIME)
+function bool RidersApart()
+{
+	local Controller A, B;
+
+	if(Level.TimeSeconds - RideEndTime > RIDE_GHOST_TIME)
+		return true;
+
+	for(A = Level.ControllerList; A != None; A = A.nextController)
+	{
+		if(CoopPlayer(A) == None || A.Pawn == None)
+			continue;
+
+		for(B = A.nextController; B != None; B = B.nextController)
+		{
+			if(CoopPlayer(B) != None && B.Pawn != None && VSize(A.Pawn.Location - B.Pawn.Location) < RIDE_APART_DISTANCE)
+				return false;
+		}
+	}
+
+	return true;
+}
+
+/*
+ * GEO_05C starts on a lift with every member on its own spot, a client playing a member stands there: nothing to hide, nobody to move (user, session
+ * 2026-11-02). A moment without a base (the lift starts) doesn't count as leaving. Not on the lifts everybody is brought to (CoopEndLift.IsSharedLift).
+ */
+function bool StaysOnCar(CoopPlayer CP, Mover M)
+{
+	if(EndLift != None && EndLift.IsSharedLift(M))
+		return false;
+
+	if(CP.Pawn.Base == M)
+		CP.LastOnCarTime = Level.TimeSeconds;
+
+	return CP.LastOnCarTime > 0 && Level.TimeSeconds - CP.LastOnCarTime < 2.5;
 }
 
 function FaceLiftCenter(CoopPlayer CP, vector Center)
@@ -998,21 +1156,59 @@ function CheckLiftRides()
 	local bool bScene;
 
 	Host = GetHost();
-	M = HostLift(Host);
+	M = HostLift(RideLeader);
 
-	// Short gaps (the host in the air for a moment, a stop at a keyframe) don't end the ride
+	// The host first, then the first client on a lift of the table: the one who rides takes the others along
+	if(M == None)
+	{
+		M = HostLift(Host);
+
+		if(M != None)
+			RideLeader = Host;
+	}
+
+	for(C = Level.ControllerList; C != None && M == None; C = C.nextController)
+	{
+		if(CoopPlayer(C) != None && !IsHost(C))
+		{
+			M = HostLift(PlayerController(C));
+
+			if(M != None)
+			{
+				RideLeader = PlayerController(C);
+				Log("CoopGame: " $ RideLeader.PlayerReplicationInfo.PlayerName $ " rides " $ M $ " first, the others come along");
+			}
+		}
+	}
+
+	// Short gaps (the leader in the air for a moment, a stop at a keyframe) don't end the ride
 	if(M != None)
 		LastRideSeenTime = Level.TimeSeconds;
-	else if(LastRideLift != None && Level.TimeSeconds - LastRideSeenTime < 2.5 && Host != None && Host.Pawn != None && VSize(Host.Pawn.Location - LastRideLift.Location) < 2000)
+	else if(LastRideLift != None && RideLeader != None && Level.TimeSeconds - LastRideSeenTime < 2.5 && RideLeader.Pawn != None && VSize(RideLeader.Pawn.Location - LastRideLift.Location) < 2000)
 		M = LastRideLift;
 
 	bScene = M == None && InStartScene();
 
 	if(M == None && bRidersHidden)
 	{
-		Log("CoopGame: the ride is over: host on " $ Host.Pawn.Base $ " physics " $ Host.Pawn.Physics $ " lift " $ LastRideLift $ " moving " $ LastRideLift.bInterpolating $ " " $ (Level.TimeSeconds - LastRideMoveTime) $ " s ago");
-		HideRiders(false);
+		if(RideEndTime == 0)
+		{
+			RideEndTime = Level.TimeSeconds;
+			Log("CoopGame: the ride is over: lift " $ LastRideLift $ " moving " $ LastRideLift.bInterpolating $ " " $ (Level.TimeSeconds - LastRideMoveTime) $ " s ago");
+		}
+
+		if(RidersApart())
+		{
+			Log("CoopGame: the riders stand apart after " $ (Level.TimeSeconds - RideEndTime) $ " s");
+			HideRiders(false);
+			RideEndTime = 0;
+		}
 	}
+	else if(M != None)
+		RideEndTime = 0;
+
+	if(M == None)
+		RideLeader = None;
 
 	if(M != None)
 		Center = LiftCenter(M);
@@ -1064,6 +1260,17 @@ function CheckLiftRides()
 				CP.GotoState('PlayerWalking');
 			}
 
+			if(M != None && CP.Pawn != None && CP.Pawn.Health > 0 && !CP.Pawn.bIncapacitated && CP.Machine == None && (CP.Pawn.Base != M || VSize(CP.Pawn.Location - RideLeader.Pawn.Location) > 60))
+			{
+				if(!bRidersHidden)
+					HideRiders(true);
+
+				Log("CoopGame: the host is put on the lift " $ M $ " at " $ RideLeader.PlayerReplicationInfo.PlayerName $ " (was on " $ CP.Pawn.Base $ " at " $ CP.Pawn.Location $ ")");
+				CP.Pawn.SetCollision(CP.Pawn.bCollideActors, false, false);
+				CP.Pawn.SetLocation(RideLeader.Pawn.Location);
+				CP.Pawn.Velocity = RideLeader.Pawn.Velocity;
+			}
+
 			continue;
 		}
 
@@ -1080,18 +1287,18 @@ function CheckLiftRides()
 			continue;
 		}
 
-		// The car is small: everybody stands where the host stands, the players don't block each other and each one only sees their
+		// The car is small: everybody stands where the first rider stands, the players don't block each other and each one only sees their
 		// own commando (HideRiders); next to the host the clients were put into the walls of the shaft
-		if(M != None && (CP.Pawn.Base != M || VSize(CP.Pawn.Location - Host.Pawn.Location) > 60))
+		if(M != None && !StaysOnCar(CP, M) && (CP.Pawn.Base != M || VSize(CP.Pawn.Location - RideLeader.Pawn.Location) > 60))
 		{
 			if(!bRidersHidden)
 				HideRiders(true);
 
-			Spot = Host.Pawn.Location;
-			Log("CoopGame: " $ CP.PlayerReplicationInfo.PlayerName $ " is put on the lift " $ M $ " at the host (was on " $ CP.Pawn.Base $ " at " $ CP.Pawn.Location $ ")");
+			Spot = RideLeader.Pawn.Location;
+			Log("CoopGame: " $ CP.PlayerReplicationInfo.PlayerName $ " is put on the lift " $ M $ " at " $ RideLeader.PlayerReplicationInfo.PlayerName $ " (was on " $ CP.Pawn.Base $ " at " $ CP.Pawn.Location $ ")");
 			CP.Pawn.SetCollision(CP.Pawn.bCollideActors, false, false);
 			CP.Pawn.SetLocation(Spot);
-			CP.Pawn.Velocity = Host.Pawn.Velocity;
+			CP.Pawn.Velocity = RideLeader.Pawn.Velocity;
 			CP.ClientSetLocation(Spot, CP.Rotation);
 		}
 
@@ -1271,6 +1478,7 @@ function Timer()
 	DetachClientMembers();
 	EnsureClientGrenades();
 	CheckAIBreach();
+	CheckStuckBreachMarkers();
 	CheckAISnipe();
 	CheckStalledScripts();
 	CheckIntroWatch();
@@ -1302,6 +1510,7 @@ function Timer()
 		CheckHostDown();
 
 	CheckTestCauses();
+	CheckTestSnipeOrder();
 
 	if(TestAction != "")
 		TickTest();
@@ -1773,6 +1982,45 @@ function CheckAIBreach()
 		EndAIBreach("the marker stopped");
 	else if(Level.TimeSeconds - BreachStartTime > 45)
 		EndAIBreach("it took too long");
+}
+
+/*
+ * A door breach marker can stay active after the door blew (state Executed, complete, the slot of the client's member empty, not in every run), with
+ * the AI members still on it. The game then refuses every other order (MU_Occupied): Sev couldn't be sent to the sniper position on GEO_01C and
+ * the mission failed (logs of a tester and of the user 2026-11-02). Why only sometimes isn't known. A marker like that is cancelled after
+ * STUCK_MARKER_TIME, a normal one is over by then. Only door breaches: a sniper or a turret marker stays active on purpose.
+ */
+function CheckStuckBreachMarkers()
+{
+	local SquadMarker M, Found;
+
+	foreach AllActors(class'SquadMarker', M)
+	{
+		if(M != BreachMarker && M.IsA('MarkerDoorBreach') && M.bMarkerActive && M.bComplete && M.IsInState('Executed'))
+		{
+			Found = M;
+			break;
+		}
+	}
+
+	if(Found != StuckMarker)
+	{
+		StuckMarker = Found;
+		StuckMarkerTime = Level.TimeSeconds;
+		return;
+	}
+
+	if(StuckMarker != None && Level.TimeSeconds - StuckMarkerTime >= STUCK_MARKER_TIME)
+	{
+		Log("CoopGame: door breach " $ StuckMarker $ " is over but keeps the squad, cancelling it: " $ StuckMarker.CancelMarker(None) $ ", active now " $ StuckMarker.bMarkerActive);
+
+		// The cancel makes it Enabled again: the host could order the breach of the blown door once more
+		if(GatherMarker == StuckMarker)
+			GatherMarker = None;
+
+		StuckMarker.GotoState('Disabled');
+		StuckMarker = None;
+	}
 }
 
 function EndAIBreach(string Reason)
@@ -4243,6 +4491,20 @@ function TickTest()
 		++TestStep;
 		return;
 	}
+	else if(TestAction ~= "hostlift")
+	{
+		TestHostLift(Host);
+		TestTime = Level.TimeSeconds + 1;
+		++TestStep;
+		return;
+	}
+	else if(TestAction ~= "turretnear")
+	{
+		TestTurretNear(Host);
+		TestTime = Level.TimeSeconds + 1;
+		++TestStep;
+		return;
+	}
 	else if(TestAction ~= "endlift")
 	{
 		// The end lift: the host steps on it, the first client later (CoopTestLater=<seconds>), the squad members stay where they are
@@ -5107,9 +5369,12 @@ function LogClientsStatus()
 		if(CP.Pawn == None)
 			Log("CoopGame: Status " $ CP.PlayerReplicationInfo.PlayerName $ ": State=" $ CP.GetStateName() $ " no pawn, ViewTarget=" $ CP.ViewTarget $ " Watching=" $ CP.WatchedMember);
 		else
+		{
+			RemoveDuplicateWeapons(CP.Pawn);
 			Log("CoopGame: Status " $ CP.PlayerReplicationInfo.PlayerName $ ": State=" $ CP.GetStateName() $ " Pawn=" $ CP.Pawn.Class.Name $ " Health=" $ CP.Pawn.Health $
 			    " Incap=" $ CP.Pawn.bIncapacitated $ " Physics=" $ CP.Pawn.Physics $ " Loc=" $ CP.Pawn.Location $ " Weapon=" $ CP.Pawn.Weapon $
-			    " WeaponState=" $ CP.Pawn.Weapon.GetStateName() $ " Grenade=" $ CP.Pawn.CurrentGrenade $ " Ping=" $ CP.PlayerReplicationInfo.Ping);
+			    " WeaponState=" $ CP.Pawn.Weapon.GetStateName() $ " Grenade=" $ CP.Pawn.CurrentGrenade $ " Ping=" $ CP.PlayerReplicationInfo.Ping $ " Weapons:" $ CP.WeaponList());
+		}
 	}
 }
 
@@ -5962,6 +6227,12 @@ function CheckAISnipeOrders()
 
 		SC = ScriptedController(P.Controller);
 
+		if(M != LastActiveSnipeMarker)
+		{
+			LastActiveSnipeMarker = M;
+			Log("CoopGame: snipe order: " $ P $ " (" $ P.Class.Name $ ") took " $ M $ ", stance " $ P.Squad.Stance $ ", controller state " $ P.Controller.GetStateName() $ ", participants " $ M.Participants[0].Member $ "," $ M.Participants[1].Member $ "," $ M.Participants[2].Member);
+		}
+
 		if(Level.TimeSeconds >= NextSnipeOrderLog)
 		{
 			NextSnipeOrderLog = Level.TimeSeconds + 3;
@@ -6680,6 +6951,128 @@ function CheckSceneWatch()
 		// The camera always flies to a member that joins the squad in its scene, also for a client that played it before
 		StartWatching(Best, P, true);
 	}
+}
+
+/*
+ * Test: ?CoopTestOrder=<F1|F2|F3|F4|none> on GEO_01C: the host gives this squad command after Sev's scene, then presses Use on the snipe marker
+ * when the level enables it, the way a player does. Logs Sev every second, "CoopTest: order".
+ */
+function CheckTestSnipeOrder()
+{
+	local string Order;
+	local CoopPlayer Host;
+	local SquadMarker M, Breach;
+	local Pawn P, Sev;
+	local rotator R;
+
+	Order = ParseOption(TestOptions, "CoopTestOrder");
+
+	if(Order == "" || SevIntro.IsRunning() || LevelStartTime <= 0 || Level.TimeSeconds < NextTestOrderStep)
+		return;
+
+	NextTestOrderStep = Level.TimeSeconds + 1;
+	Host = CoopPlayer(GetHost());
+
+	if(Host == None || Host.Pawn == None)
+		return;
+
+	foreach DynamicActors(class'Pawn', P)
+	{
+		if(P.IsA('Commando07Delta'))
+			Sev = P;
+	}
+
+	foreach AllActors(class'SquadMarker', M)
+	{
+		if(M.Tag == 'BalconyMarkerSnipe')
+			break;
+	}
+
+	// ?CoopTestStuckMarker=1: the door breach marker with the AI members on it, put into the stuck state (see CheckStuckBreachMarkers)
+	if(ParseOption(TestOptions, "CoopTestStuckMarker") != "")
+	{
+		foreach AllActors(class'SquadMarker', Breach)
+		{
+			if(Breach.IsA('MarkerDoorBreach') && Breach.Anchor != None)
+				break;
+		}
+
+		if(TestOrderTime == 0)
+		{
+			TestOrderTime = Level.TimeSeconds;
+			Log("CoopTest: order: stuck marker, ExecuteMarker=" $ Breach.ExecuteMarker(Host.Pawn) $ " active=" $ Breach.bMarkerActive);
+			Breach.bComplete = true;
+			Breach.GotoState('Executed');
+		}
+
+		if(Level.TimeSeconds - TestOrderTime < 12)
+			Log("CoopTest: order: stuck marker state=" $ Breach.GetStateName() $ " active=" $ Breach.bMarkerActive $ " Sev marker=" $ Sev.SquadMarker $ " usability=" $ Breach.GetMarkerUsability(Host.Pawn));
+
+		return;
+	}
+
+	// ?CoopTestBreachFirst=1: the door breach of the level first, everybody moved to the door
+	if(TestOrderStage == 0 && !bTestBreachDone && ParseOption(TestOptions, "CoopTestBreachFirst") != "" && Host.IsInState('PlayerWalking'))
+	{
+		foreach AllActors(class'SquadMarker', Breach)
+		{
+			if(Breach.IsA('MarkerDoorBreach') && Breach.Anchor != None && Breach.Anchor.Tag == 'BreachDoorSunFac')
+				break;
+		}
+
+		if(Breach != None && GatherMarker == None && BreachMarker == None && !bTestBreachOrdered)
+		{
+			bTestBreachOrdered = true;
+			R = rotator(Host.Location - Breach.Anchor.Location);
+			Host.Pawn.SetLocation(Breach.Anchor.Location + vector(R) * 150 + vect(0,0,-40));
+
+			foreach DynamicActors(class'Pawn', P)
+			{
+				if(P.IsA('CloneCommando') && P != Host.Pawn)
+					P.SetLocation(Breach.Anchor.Location + vector(R) * 260 + vect(0,0,-40));
+			}
+
+			Log("CoopTest: order: breach ordered, handled=" $ OrderDoorBreach(Host, Breach, false));
+			return;
+		}
+
+		if(bTestBreachOrdered && Breach.Anchor != None && !Breach.Anchor.IsInState('Locked') && !Breach.Anchor.IsInState('ChargeLocked') && BreachMarker == None)
+		{
+			bTestBreachDone = true;
+			NextTestCause = Level.TimeSeconds - LevelStartTime + 5;
+			TestCauses = "ActivateShield";
+			Log("CoopTest: order: door open, active=" $ Breach.bMarkerActive $ " complete=" $ Breach.bComplete);
+		}
+
+		return;
+	}
+
+	if(TestOrderStage == 0 && Host.IsInState('PlayerWalking'))
+	{
+		TestOrderStage = 1;
+		Log("CoopTest: order: squad command " $ Order);
+
+		if(Order ~= "F1")
+			Host.SetStanceOffensive();
+		else if(Order ~= "F2")
+			Host.SetStanceDefensive();
+		else if(Order ~= "F3")
+			Host.SquadEngage();
+		else if(Order ~= "F4")
+			Host.CancelAllMarkers();
+	}
+	else if(TestOrderStage == 1 && M != None && M.IsInState('Enabled') && M.AlwaysVisible && Host.IsInState('PlayerWalking'))
+	{
+		TestOrderStage = 2;
+		TestOrderTime = Level.TimeSeconds;
+		Host.TargetMarker = M;
+		Host.TargetType = TGT_Marker;
+		Host.Use();
+		Log("CoopTest: order: pressed Use on " $ M $ " active=" $ M.bMarkerActive $ " Sev=" $ Sev $ " Squad=" $ Sev.Squad $ " leader=" $ Sev.Squad.SquadLeader);
+	}
+
+	if(TestOrderStage > 0 && Sev != None && M != None && Level.TimeSeconds - TestOrderTime < 40)
+		Log("CoopTest: order: stage " $ TestOrderStage $ " Sev dist " $ int(VSize(Sev.Location - M.Anchor.Location)) $ " Marker=" $ Sev.SquadMarker $ " active=" $ M.bMarkerActive $ " underway=" $ WasHeard(M.EventUnderway) $ " Controller=" $ Sev.Controller.GetStateName() $ " action=" $ ScriptedController(Sev.Controller).ActionNum $ " stance=" $ Sev.Squad.Stance $ " host target=" $ Host.TargetType);
 }
 
 // Test: ?CoopTestCause=<event>,<event>... triggers the events of a scene, one every CoopTestCauseEvery seconds, the first after that time
