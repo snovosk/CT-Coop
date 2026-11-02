@@ -4,9 +4,11 @@ A co-op campaign for Star Wars: Republic Commando with a host-authoritative desi
 the host runs a listen server (`?listen`), clients connect to IP:7777. Only the native replication of UE2 is used.
 Custom C++ is used only where the engine crashes or blocks network play on single player maps.
 
-## Status (0.71, public test build)
+## Status (0.72, public test build)
 
 The first episode (Geonosis) has been played by hand in co-op from start to end. Raxus Prime and Kashyyyk have been checked by automated tests and reading the scripts, not played through. Each of up to three clients plays its own Delta squad member. Not compatible with 0.6 (new replicated functions; the version is checked when joining).
+
+Release 0.72: archive `SWRC-Coop-0.72.zip`, same files as 0.71. Changes: see "0.72: changes after 0.71".
 
 Release 0.71: archive `SWRC-Coop-0.71.zip` (the above plus `CoopTunnel`, `Collect-Logs`). The Steam connection was played on two PCs with the first relay; `CoopTunnel` has been tested on one PC: through `--direct`, and with real Steam for sign-in, friends, host status and P2P data on one account. Changes: see "0.71: changes after 0.7" and "0.71: changes while testing it".
 
@@ -291,6 +293,25 @@ Versions before 0.4 were called 1.0–1.3 (release 1.3 was renamed to 0.3).
 | Three or more players through the relay — `CoopTunnel/Main.cpp` | All friends came from 127.0.0.1. The engine ignores more than 5 logins a minute from one address: with 3 clients the lobby and the next level are 6 logins, the sixth client waited for timeouts (`More than 5 logins per minute`) | Each friend gets a local address of its own, 127.0.1.N | Own test 2026-11-02 | Test `lobby` with 3 clients through `--direct`, 4 runs: 9 connections, no timeout, no reconnect. Note: tests by IP on one PC still share 127.0.0.1 |
 | Members picked in the lobby that join in a scene — `CoopGame.JoinsLater` (new), `SpawnClient`, `CheckSquadTakeover` | With the lobby the client knows its member from the start: on GEO_01B it watched Fixer at once. Fixer is in the squad until his script starts, so the checks for a free member took him | The client plays a temporary commando until the script adds the member; the camera flies from it to the member (`CheckSceneWatch`). Scripts without an add aren't affected | User report 2026-11-02 | Test `lobby` with `CoopTestCause` on GEO_01B and GEO_01A, screenshots. Manual: pending |
 | GEO_01C, Sev's fall — `CoopSevIntro` (new), `CoopGame.StartIntroWatch`, `CheckIntroWatch`, `CheckRopeLandings` | The client got Sev at the start of the level (the search for an entrance stops at the script's second wait); the others got the control when they landed | The client of Sev watches the animation to its end and takes him where he stands, the walk to `07StartPoint` is dropped. The others look at him and everybody gets the control together. `PopUp07Intro` and `ActivateSquad` keep their time behind the voice line | User request 2026-11-02 | Test `lobby` with 3 clients: animation 6.9 s, 07 taken over where it ended, 40 and 62 and the host after it, events triggered; screenshots of the clients and the host. Manual: pending |
+
+## 0.72: changes after 0.71
+
+| Level / module | Was | Now | Reason | Verified |
+|---|---|---|---|---|
+| Player class from another mod — `CoopPlayer.SetPawnClass` (new) | `Class=` from `User.ini` or the URL was used: a tester's host played `FirstPersonPlayer.FirstPersonPlayerCommando`, which isn't in `ServerPackages`, and the client reported that it doesn't see the host | Every player is `CTCharacters.PlayerCommando` in co-op, logged when something else was asked for. `User.ini` isn't changed | Tester's report and host log 2026-11-01 | Reproduced with the mod SWRC_FP 4 on the host and a client install without it: without this change the host walks through the client's view and isn't drawn, with it he is. The host loses the mod's visible body in co-op. Squad orders: not reproduced, the mod's package looks like animations only; the automated snipe test didn't reach the order |
+
+| Hint for the sniper order on GEO_01C — `CoopGame.HintSnipeOrder` (new) | With the AI playing Sev only the host's order puts him on the position, without it `TakeOff` ends in `MissionFailed`. The level shows a short prompt (`Target the crate and press F`), its longer pause hint is skipped in co-op (`ModCoop: Skipped hint`); a tester failed here | Every 8 s until the order: "ORDER SEV: AIM AT THE CRATE, PRESS USE". Only with `BalconyMarkerSnipe`, the scene itself is unchanged | Tester's report 2026-11-01 | Test: `lobby` with `CoopTestCause=ActivateShield`, marker enabled, hint in the log, screenshot of the host. The hint and the game's prompt share one place on screen, one replaces the other. Giving the order after it by hand: pending |
+
+### Hints for orders
+
+Where the same hint may help (not done). From the scripts of the maps, not played: markers whose `EventUnderway` a level uses. Tutorial hints (`ACTION_ShowDebriefingScreen` with `CTPauseHintText`) are skipped in co-op everywhere, also the ones explaining orders: first check those levels.
+
+- `GEO_01A`, `GEO_01B`: demolition and hack markers shown by scripts (`MarkerDemolition`, `MarkerDemolitionBrokenDoor`, `MarkerHackTerminalShield`): the host can't order them when a client plays the specialist.
+- `GEO_03C` demolition (`DialogRockBridge`), `GEO_04B` grenade (`UpdateTracker01`), `YYY_35B` demolition (`SecondSupply`).
+- `RAS_03C` turrets (`SquadOnTurret1`, `SquadOnTurret2`), `YYY_35C` turret (`SquadControlsTurret`).
+- `RAS_02D`, `YYY_04B`, `YYY_04F` hack doors, `YYY_04B`, `YYY_05C` breaches, `RAS_03A`, `YYY_04E` traps.
+- `YYY_01B`, `YYY_05A`, `YYY_06B` snipes. Only `GEO_01C` fails the mission for a missing snipe; `YYY_01E` has a `MissionFailed` too, for General Tarfful's death.
+- The hint could also tell a client "only you can do this" instead of the host's message `<name> has to do this himself`.
 
 ## Plan
 

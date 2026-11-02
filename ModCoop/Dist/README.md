@@ -20,7 +20,7 @@ The mod is built on [SWRC-Modding/CT](https://github.com/SWRC-Modding/CT), the c
   with the patch. Every player needs the same version of the game.
 - **Windows 10 or 11** (32 or 64 bit). Nothing else has to be installed: no Visual C++ runtime, no .NET. Linux/Steam Deck with
   Proton isn't tested.
-- **The same co-op archive for every player.** The version is shown in the menu title (`MOD 0.71`) and at the start of the log.
+- **The same co-op archive for every player.** The version is shown in the menu title (`MOD 0.72`) and at the start of the log.
 - **A connection between the host and the clients:** the same local network, or the same VPN network (ZeroTier, Radmin VPN,
   Hamachi), or ports **7777 and 11138 (TCP and UDP)** forwarded on the host's router. The host allows `CT.exe` in the Windows firewall (the mod asks
   for it on the first start).
@@ -132,6 +132,8 @@ line per level you want: `CoopLevels+=GEO_01A`, `CoopLevels+=GEO_01B`, … (with
 
 ## Graphics mods
 
+**Co-op works best without other mods.** A mod that replaces the player's class (for example First Person Player Legs) is ignored in co-op: every player is the normal commando there, otherwise others couldn't see that player. Single player isn't affected.
+
 Mods that only change textures, models, shaders or rendering (high resolution texture packs, ReShade, DXVK, dgVoodoo,
 widescreen fixes) don't affect co-op, but **all players must have the same game packages**. The engine compares the package
 files (`.u`, `.utx`, `.usx`, `.ukx`, maps) of the client and the host and drops the connection if they differ. So install mods
@@ -187,7 +189,7 @@ game, so copy it right after playing). Please send with a report:
   from the host and from the client at the same place).
 
 The first lines of the log contain what's needed to tell problems of the computer from problems of the mod: the mod's version
-(`ModCoop version 0.71`), Windows, processor, memory, graphics card, the resolution of the desktop, the game's exe and the
+(`ModCoop version 0.72`), Windows, processor, memory, graphics card, the resolution of the desktop, the game's exe and the
 wrappers next to it (`ModCoop: System: ...`). There is no personal data in it besides the names of the computer and of the
 Windows user, which the engine itself writes (`Init: Computer`, `Init: User`); remove them if you like.
 
@@ -196,7 +198,7 @@ Windows user, which the engine itself writes (`Init: Computer`, `Init: User`); r
 | Problem | Solution |
 |---|---|
 | The client can't connect: `NO ANSWER FROM THE HOST` or an empty checkered room | The host doesn't answer. Check in this order: **1)** the host has started the server (their `CT.log` contains the line `TcpNetDriver on port 7777`); **2)** the firewall was allowed on the host PC at the first start (if you answered "No", delete `GameData\Save\ModCoopFirewall.done` and start the game again); **3)** you connect to the host's IP address **in ZeroTier** (shown in the host's ZeroTier client under "Managed IPs"), not to their home IP address; **4)** both PCs are in the same ZeroTier network and marked `Auth` on my.zerotier.com; **5)** zapret, antivirus software or another VPN — turn them off for a moment and try again. The checkered room is a placeholder map the game shows while it waits for the connection; your textures are fine. |
-| The host's log shows `Login request`/`Login from ...`, but the client is dropped right away (the client's log shows `Welcomed by server`, then `Close`) | **You have different versions of the mod.** Every build of the mod is unique, and the engine silently drops the connection if the files don't match. Both players must extract **the same archive** (the version is shown in the menu title, e.g. `CO-OP CAMPAIGN: JOIN (MOD 0.71)`, and at the start of the log: `ModCoop version 0.71`). The host writes `ModCoop version mismatch` with both versions to its log. Versions before 0.4 were called 1.x (release 0.3 shows `MOD 1.3` in the menu). |
+| The host's log shows `Login request`/`Login from ...`, but the client is dropped right away (the client's log shows `Welcomed by server`, then `Close`) | **You have different versions of the mod.** Every build of the mod is unique, and the engine silently drops the connection if the files don't match. Both players must extract **the same archive** (the version is shown in the menu title, e.g. `CO-OP CAMPAIGN: JOIN (MOD 0.72)`, and at the start of the log: `ModCoop version 0.72`). The host writes `ModCoop version mismatch` with both versions to its log. Versions before 0.4 were called 1.x (release 0.3 shows `MOD 1.3` in the menu). |
 | zapret (zapret-discord-youtube) | By itself it doesn't affect ZeroTier addresses `10.x.x.x`, `172.16–31.x.x` or the local network: they are in its `ipset-exclude.txt`. But with **Game Filter** enabled it intercepts all UDP ports 1024–65535, so for Radmin (`26.x.x.x`), Hamachi (`25.x.x.x`) or if you changed the lists, turn Game Filter off (service.bat → option 4) or add the host's address to `lists\ipset-exclude-user.txt`. |
 | Connected, but dropped right away with "SERVER CONTENT ... IS NOT PRESENT" | The client has a different version of the mod or no mod at all. Install the same archive as the host. |
 | "YOUR CD KEY IS INVALID OR IN USE" | Since 0.57 the host doesn't check the CD keys of clients. If you see this message, the host has an old version of the mod. |

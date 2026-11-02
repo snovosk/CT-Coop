@@ -163,6 +163,7 @@ var array<SquadMarker> ClientSnipeMarkers; // See CheckClientSnipers: 1 entry pe
 var array<byte>        ClientSnipeStates;  // 1 = the client was asked to take the position, 2 = in position
 var float              NextSnipeTrackerTime;
 var bool  bWaitingForClients;    // See WaitForClients
+var float NextSnipeOrderHint;       // See HintSnipeOrder
 var CoopSevIntro SevIntro;         // See CoopSevIntro
 var CoopEndLift EndLift;           // See CoopEndLift
 var CoopLobby Lobby;               // Only on the map of the lobby, see CoopLobby
@@ -191,6 +192,8 @@ var() config float MaxClientWait;  // Seconds the start of a level waits for the
 var SquadMarker GatherMarker;    // Door breach ordered by the host, waits until all clients playing squad members are at the door (see CheckGather)
 var float NextGatherMessage;
 
+const SNIPE_ORDER_HINT_INTERVAL = 8.0;
+const SNIPE_ORDER_HINT_TIME = 6.0;
 const GAME_CLASS = "ModCoop.CoopGame";
 
 event InitGame(string Options, out string Error)
@@ -4981,7 +4984,7 @@ function LogCommandos()
 		if(P.IsA('CloneCommando') && P.Health > 0)
 		{
 			++Num;
-			Str = Str $ " " $ P $ "(" $ P.Controller $ ")";
+			Str = Str $ " " $ P $ "/" $ P.Class.Name $ "(" $ P.Controller $ ")";
 		}
 	}
 
@@ -6051,6 +6054,33 @@ function SkipToSnipeWait(name EventName)
 }
 
 /*
+ * A snipe position the level's script waits for (GEO_01C: without Sev on it Sun Fac's ship gets away and the mission fails) while the AI plays
+ * Sev: only the host's order sends him there. New players didn't know: the host is told until the order is given. Only this marker so far:
+ * for other places where it may help see "Hints for orders" in the DEVLOG.
+ */
+function HintSnipeOrder(SquadMarker M)
+{
+	local PlayerController Host;
+	local color TextColor;
+
+	Host = GetHost();
+
+	if(CoopPlayer(Host) == None || Host.Pawn == None || M.Tag != 'BalconyMarkerSnipe' || M.EventUnderway == '' || !M.AlwaysVisible || !M.IsInState('Enabled') || M.bComplete ||
+	   WasHeard(M.EventUnderway) || Level.TimeSeconds < NextSnipeOrderHint)
+		return;
+
+	if(NextSnipeOrderHint == 0)
+		Log("CoopGame: the host is told to order the sniper to " $ M);
+
+	NextSnipeOrderHint = Level.TimeSeconds + SNIPE_ORDER_HINT_INTERVAL;
+	TextColor.R = 255;
+	TextColor.G = 220;
+	TextColor.B = 120;
+	TextColor.A = 255;
+	CoopPlayer(Host).ClientCoopCriticalMessage("ORDER SEV: AIM AT THE CRATE, PRESS USE", SNIPE_ORDER_HINT_TIME, TextColor);
+}
+
+/*
  * Snipe markers (GEO_01C: Sun Fac's ship): the AI sniper triggers EventUnderway (InSnipePosition) when it reached the position, the
  * level decides on it whether the mission succeeds. A client playing Sev can't be ordered there: he is asked to go there himself
  * when the level shows the marker, and the event is triggered once he is next to the position.
@@ -6067,6 +6097,9 @@ function CheckClientSnipers()
 			continue;
 
 		PC = MarkerClient(M);
+
+		if(PC == None)
+			HintSnipeOrder(M);
 
 		if(PC == None || PC.Pawn == None)
 			continue;

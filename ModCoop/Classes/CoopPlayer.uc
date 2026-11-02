@@ -286,6 +286,18 @@ function ServerCoopReady()
 }
 
 // See CoopGame.StartAIBreach
+/*
+ * Every player is a normal commando, whatever Class= the player's User.ini or URL asks for. A class from another mod (FirstPersonPlayer on a
+ * tester's host, session 2026-11-01) isn't in ServerPackages: a client without that mod can't load it and doesn't see the player.
+ */
+function SetPawnClass(string InClass)
+{
+	if(!(InClass ~= string(class'PlayerCommando')))
+		Log("CoopPlayer: class " $ InClass $ " replaced by " $ class'PlayerCommando');
+
+	PawnClass = class'PlayerCommando';
+}
+
 simulated function ClientCoopSetWatchFocus(vector Focus, bool bSet)
 {
 	WatchFocus = Focus;
