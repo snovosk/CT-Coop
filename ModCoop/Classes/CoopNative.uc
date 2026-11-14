@@ -38,6 +38,30 @@ native static final function WriteSavedString(string IniName, string Section, st
 // Native fixes that are needed to play single player maps as a network client
 native static final function InstallClientFixes();
 
+// Sound journal: <log name>-Sounds.log next to the game's log, every PlaySound/PlayOwnedSound/StopSound of this side and the lines given here
+native static final function SetSoundLog(bool bEnabled);
+native static final function LogSound(string Line);
+
+// Checkpoint saves (CoopGame.SaveCheckpoint): UGameEngine::SaveGame called directly, past the console command's check of the network mode.
+// Returns what happened and the files in the save container.
+native static final function string EngineSaveGame(string SaveName);
+
+// Research: the level's package as the network announces it (name, file, GUID, counts)
+native static final function string LevelPackageText(Actor A);
+
+// Host, after loading a save: the network numbers the save's objects like the clean map, so clients can follow (see ModCoop.cpp)
+native static final function string RemapSavedLevel(Actor A, string SaveName);
+
+// GUID of this build of ModCoop.u: saves of another build can't be loaded (CoopSaveSlots)
+native static final function string ModPackageGuid();
+
+// The helmet's single player HUD (visor) in a network game, while a coop HUD exists (see ModCoop.cpp). Returns what happened
+// HUD: the coop HUD whose DrawVisorSquad draws into the visor's working target
+native static final function string SetVisorHUD(bool bOn, optional Object HUD);
+
+// After a save is loaded: the level's URL without the host it was saved with, so the next level change isn't a connect (see ModCoop.cpp)
+native static final function string FixLoadedLevelURL(Actor A);
+
 // Crash diagnostics: the last step of the script, logged with the exception if the game crashes (see ModCoop.cpp)
 native static final function SetDebugStep(string Step);
 

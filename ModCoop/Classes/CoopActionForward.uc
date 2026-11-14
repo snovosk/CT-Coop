@@ -85,4 +85,8 @@ static function RunOnClient(CoopPlayer PC, string ActionPath)
 	PC.LocalActionController.Instigator = PC.Pawn;
 	Log("ModCoop: script action of the host: " $ Action.GetActionString());
 	Action.InitActionFor(PC.LocalActionController);
+
+	// The credits end the campaign: when the host leaves afterwards this is no lost connection to come back to
+	if(ACTION_ShowMenuScreen(Action) != None)
+		class'CoopConfig'.static.EndSession();
 }

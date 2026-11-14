@@ -30,6 +30,8 @@ var FunctionOverride SetHiddenOverride;
 var FunctionOverride GotoStateOverride;
 var FunctionOverride PlayAnimOverride;
 var FunctionOverride PlayPropAnimOverride;
+var FunctionOverride HurtActorOverride;
+var FunctionOverride ChangeSquadMemberOverride;
 var FunctionOverride CriticalMessageOverride;
 var FunctionOverride ActivateItemTransitionOverride; // Effects for the clients (see CoopGame.ForwardEffect)
 var FunctionOverride DispenserTransitionOverride;
@@ -43,6 +45,14 @@ var FunctionOverride AttachmentBeginOverride;    // Same, when the attachment is
 var array<CoopTurretFire> TurretFires;           // Shots of clients on turrets (see CoopTurretFire)
 var FunctionOverride WeaponSetOverride;          // Quiet new inventory on clients (see WeaponClientWeaponSet)
 var array<CoopActionForward> ActionForwards;     // Script actions that only reach the server's player (see CoopActionForward)
+var FunctionOverride StopFactoryOverride;        // Scripts that give up on a door the clients hold (see CoopDoorHold)
+var FunctionOverride DestroyActorOverride;
+var FunctionOverride ShowIconsOverride;          // One writer of the markers' bHidden on clients (see SquadMarkerShowIcons)
+var FunctionOverride LaserDestroyedOverride;     // Remote beam of a destroyed laser (see RemoveRemoteBeam)
+var FunctionOverride PawnPlayFiringOverride;     // See PawnPawnPlayFiring
+var FunctionOverride MoverToKeyframeOverride;    // A level that starts on a moving lift waits for the clients (see CoopEndLift.ShouldHoldStartLift)
+var FunctionOverride HudDescriptionOverride;     // The player's name over the host and over a commando without a squad member (see PawnHudName)
+var FunctionOverride HudNicknameOverride;
 
 function Init(SWRCFix Fix)
 {
@@ -52,6 +62,7 @@ function Init(SWRCFix Fix)
 	class'CoopNative'.static.LoadSavedConfig(class'CoopConfig', "ModCoop.ini");
 	class'CoopConfig'.static.LoadLists();
 	class'CoopNative'.static.LoadSavedConfig(class'CoopGame', "ModCoop.ini");
+	class'CoopNative'.static.SetSoundLog(class'CoopConfig'.default.bSoundLog);
 
 	// Coop server started from the command line (e.g. the host batch file). The package must be added before the server starts listening.
 	if(InStr(Caps(class'CoopNative'.static.GetCommandLine()), "MODCOOP.COOPGAME") != -1)
@@ -101,6 +112,10 @@ function Init(SWRCFix Fix)
 	PlayAnimOverride.Init(class'ACTION_PlayAnim', 'InitActionFor', self, 'PlayAnimInitActionFor');
 	PlayPropAnimOverride = new class'FunctionOverride';
 	PlayPropAnimOverride.Init(class'ACTION_PlayPropAnim', 'InitActionFor', self, 'PlayPropAnimInitActionFor');
+	HurtActorOverride = new class'FunctionOverride';
+	HurtActorOverride.Init(class'ACTION_HurtActor', 'InitActionFor', self, 'HurtActorInitActionFor');
+	ChangeSquadMemberOverride = new class'FunctionOverride';
+	ChangeSquadMemberOverride.Init(class'ACTION_ChangeSquadMember', 'InitActionFor', self, 'ChangeSquadMemberInitActionFor');
 	GotoStateOverride = new class'FunctionOverride';
 	GotoStateOverride.Init(class'ACTION_GotoState', 'InitActionFor', self, 'GotoStateInitActionFor');
 	CriticalMessageOverride = new class'FunctionOverride';
@@ -130,6 +145,22 @@ function Init(SWRCFix Fix)
 	AddTurretFire(class<Weapon>(DynamicLoadObject("CTInventory.ATTEWalkerTurret", class'Class')));
 	WeaponSetOverride = new class'FunctionOverride';
 	WeaponSetOverride.Init(class'Weapon', 'ClientWeaponSet', self, 'WeaponClientWeaponSet');
+	StopFactoryOverride = new class'FunctionOverride';
+	StopFactoryOverride.Init(class'ACTION_StopFactorySpawning', 'InitActionFor', self, 'StopFactorySpawningInitActionFor');
+	DestroyActorOverride = new class'FunctionOverride';
+	DestroyActorOverride.Init(class'ACTION_DestroyActor', 'InitActionFor', self, 'DestroyActorInitActionFor');
+	ShowIconsOverride = new class'FunctionOverride';
+	ShowIconsOverride.Init(class'SquadMarker', 'ShowIcons', self, 'SquadMarkerShowIcons');
+	LaserDestroyedOverride = new class'FunctionOverride';
+	LaserDestroyedOverride.Init(class'LaserWeapon', 'Destroyed', self, 'LaserWeaponDestroyed');
+	PawnPlayFiringOverride = new class'FunctionOverride';
+	PawnPlayFiringOverride.Init(class'Pawn', 'PawnPlayFiring', self, 'PawnPawnPlayFiring');
+	MoverToKeyframeOverride = new class'FunctionOverride';
+	MoverToKeyframeOverride.Init(class'ACTION_MoverToKeyframe', 'InitActionFor', self, 'MoverToKeyframeInitActionFor');
+	HudDescriptionOverride = new class'FunctionOverride';
+	HudDescriptionOverride.Init(class'Pawn', 'GetHudDescription', self, 'PawnHudDescription');
+	HudNicknameOverride = new class'FunctionOverride';
+	HudNicknameOverride.Init(class'Pawn', 'GetHudNickname', self, 'PawnHudNickname');
 
 	AddActionForward(class'ACTION_PlayMusic');
 	AddActionForward(class'ACTION_SetImuseState');
@@ -276,6 +307,9 @@ function string RedirectMenuClass(string MenuClassName)
 {
 	if(MenuClassName ~= "XInterfaceCTMenus.CTMultiplayerPCMenu")
 		return "ModCoop.CoopMultiplayerMenu";
+
+	if(MenuClassName ~= "XInterfaceCTMenus.CTMultiplayerPausePCMenu")
+		return "ModCoop.CoopPauseMenu";
 
 	return MenuClassName;
 }
@@ -520,6 +554,10 @@ function bool TriggerIsRelevant(Actor Other)
 
 	// See CoopEndLift: it starts when the squad is on the lift, not with the first one who touches this trigger
 	if(CoopGame(T.Level.Game) != None && CoopGame(T.Level.Game).EndLift != None && CoopGame(T.Level.Game).EndLift.IsHeld(T))
+		return false;
+
+	// See CoopDoorHold
+	if(CoopGame(T.Level.Game) != None && CoopGame(T.Level.Game).DoorHold != None && CoopGame(T.Level.Game).DoorHold.IsHeld(T, Other))
 		return false;
 
 	if(T.bInitiallyActive && Pawn(Other) != None && CoopPlayer(Pawn(Other).Controller) != None && Pawn(Other).IsA('CloneCommando'))
@@ -871,6 +909,218 @@ function bool PlayPropAnimInitActionFor(ScriptedController C)
 	}
 
 	return bResult;
+}
+
+// See CoopGame.HurtPlayersInTrigger
+function bool HurtActorInitActionFor(ScriptedController C)
+{
+	if(CoopGame(C.Level.Game) != None && CoopGame(C.Level.Game).HurtPlayersInTrigger(C, ACTION_HurtActor(HurtActorOverride.CurrentSelf)))
+		return false;
+
+	return ACTION_HurtActor(HurtActorOverride.CurrentSelf).InitActionFor(C);
+}
+
+// See CoopDoorHold: the script's stop waits until the clients are through the door
+function bool StopFactorySpawningInitActionFor(ScriptedController C)
+{
+	local ACTION_StopFactorySpawning Action;
+
+	Action = ACTION_StopFactorySpawning(StopFactoryOverride.CurrentSelf);
+
+	if(CoopGame(C.Level.Game) != None && CoopGame(C.Level.Game).DoorHold != None && CoopGame(C.Level.Game).DoorHold.ShouldDeferFactoryStop(Action.FactoryTag))
+		return false;
+
+	return Action.InitActionFor(C);
+}
+
+/*
+ * HACK: a flying pawn with full flying animations (bHasFullFlyAnims: the Elite Geonosian) firing during a script's animation lets go of it in
+ * single player: the script gets AnimEnd on channel 0 right after PawnPlayFiring and ClearAnimation plays the flying idle. In a network game
+ * the same call doesn't end channel 0 (why, in the native animation code, isn't known), the script's animation plays on: GEO_03C's Elite
+ * rose 900 units more with the root motion of its Intro, past every FlyPoint, found no anchor and hung under the ceiling for the rest of
+ * the fight (the tester's game on 0.73, test elite: 1830 in single player, 2700 in a network game). The script lets go here like in
+ * single player. Remove when the native reason is found.
+ */
+simulated function PawnPawnPlayFiring(name AnimName, bool bLoop)
+{
+	local Pawn P;
+	local ScriptedController C;
+
+	P = Pawn(PawnPlayFiringOverride.CurrentSelf);
+	P.PawnPlayFiring(AnimName, bLoop);
+
+	if(P.Level.NetMode == NM_Standalone || P.Level.NetMode == NM_Client || !P.bHasFullFlyAnims || P.Physics != PHYS_Flying || P.bDisableFireAnims)
+		return;
+
+	C = ScriptedController(P.Controller);
+
+	if(C != None && C.bControlAnimations && C.IsInState('Scripting') && C.CurrentAnimation != None && !C.CurrentAnimation.bWaitUntilAnimEnd)
+	{
+		Log("CoopGame: " $ P $ " fires during the script's animation " $ C.CurrentAnimation.BaseAnim $ ", the script lets go of it like in single player");
+		C.ClearAnimation();
+	}
+}
+
+/*
+ * See CoopEndLift.ShouldHoldStartLift. The script waits on a timer like the action itself does (CompleteWhenTimer), and ActionNum is put back one
+ * so that the completion comes back to this action: it asks again every poll until the lift is released.
+ */
+function bool MoverToKeyframeInitActionFor(ScriptedController C)
+{
+	local ACTION_MoverToKeyframe Action;
+	local CoopGame Game;
+	local bool bLatent;
+
+	Action = ACTION_MoverToKeyframe(MoverToKeyframeOverride.CurrentSelf);
+	Game = CoopGame(C.Level.Game);
+
+	if(Game == None || Game.EndLift == None || !Game.EndLift.ShouldHoldStartLift(Action))
+	{
+		bLatent = Action.InitActionFor(C);
+
+		// Where the mover stops, for the clients' copies (see CoopGame.SendMoverStops)
+		if(Game != None && Action.MoverTag != 'None')
+			Game.SendMoverStops(Action.MoverTag);
+
+		return bLatent;
+	}
+
+	--C.ActionNum;
+	C.CurrentAction = Action;
+	C.SetTimer(Game.EndLift.StartLiftPoll(), false);
+
+	return true;
+}
+
+function bool DestroyActorInitActionFor(ScriptedController C)
+{
+	local ACTION_DestroyActor Action;
+
+	Action = ACTION_DestroyActor(DestroyActorOverride.CurrentSelf);
+
+	if(CoopGame(C.Level.Game) != None && CoopGame(C.Level.Game).DoorHold != None && CoopGame(C.Level.Game).DoorHold.ShouldDeferDestroy(Action.DestroyTag))
+		return false;
+
+	return Action.InitActionFor(C);
+}
+
+/*
+ * RAS_01C, every console showed as sliceable on clients. PostBeginPlay isn't simulated, so a client's marker has no Participants[0].IconActor and
+ * the original only warns there. CoopGame.SyncMarkerVisibility decides the bHidden of the marker on the client, nothing else may write it.
+ */
+/*
+ * Names over squad members (APawn::PostRender, coop since 2026-11-12): Delta members have their nickname (SEV, FIXER, SCORCH), the host's
+ * PlayerCommando and a CoopCommando only Pawn's defaults, "00" and "" (the user saw "00" over the host). In a network game a pawn played
+ * by somebody shows that player's name. Only Pawn's own functions are hooked, the members' overrides stay as they are.
+ */
+simulated function string PawnHudName(Pawn P)
+{
+	if(P == None || P.Level.NetMode == NM_Standalone || P.PlayerReplicationInfo == None || P.PlayerReplicationInfo.PlayerName == "")
+		return "";
+
+	return Caps(P.PlayerReplicationInfo.PlayerName);
+}
+
+simulated function string PawnHudDescription()
+{
+	local Pawn P;
+	local string Name;
+
+	P = Pawn(HudDescriptionOverride.CurrentSelf);
+	Name = PawnHudName(P);
+
+	if(Name != "")
+		return Name;
+
+	return P.GetHudDescription();
+}
+
+simulated function string PawnHudNickname()
+{
+	local Pawn P;
+	local string Name;
+
+	P = Pawn(HudNicknameOverride.CurrentSelf);
+	Name = PawnHudName(P);
+
+	// The color of the name in tactical mode: CoopPlayer.CheckNameColors
+	if(Name != "")
+		return Name;
+
+	return P.GetHudNickname();
+}
+
+/*
+ * How a hologram is seen: SquadMarker.UpdateIcons, called every frame for the player's TargetMarker (CTPlayer.PlayerTick), shows it when
+ * the marker is of use to that player; the render pass (Engine.dll, the hologram shader near 0x10564340) hides it again, alpha 0 and
+ * bHidden, as soon as it is neither looked at nor active. On a client the use is always "irrelevant" (ASquadMarker::GetMarkerUsability
+ * needs the viewer to lead a squad), and this hook kept the client's own calls out entirely. On a client the server's decision for that
+ * client (CoopGame.SyncMarkerVisibility) now takes the place of the use. See also CoopPlayer.SelectTargetType for the TargetMarker.
+ */
+simulated function SquadMarkerShowIcons(bool Show, int Start, int Stop)
+{
+	local SquadMarker M;
+	local CoopPlayer PC;
+	local int i;
+
+	M = SquadMarker(ShowIconsOverride.CurrentSelf);
+
+	if(M.Role == ROLE_Authority)
+	{
+		M.ShowIcons(Show, Start, Stop);
+		return;
+	}
+
+	PC = CoopPlayer(M.Level.GetLocalPlayerController());
+
+	if(PC == None || !PC.IsMarkerShown(M))
+		return;
+
+	// SquadMarker.ShowIcons itself, without the icons a client's copy doesn't have: it warned every frame for each of them (8000 lines in
+	// the client's log of the user's act 2 game)
+	for(i = Start; i < Stop && i < ArrayCount(M.Participants); ++i)
+	{
+		if(M.Participants[i].IconActor != None)
+			M.Participants[i].IconActor.bHidden = false;
+	}
+}
+
+simulated function LaserWeaponDestroyed()
+{
+	RemoveRemoteBeam(LaserWeapon(LaserDestroyedOverride.CurrentSelf));
+	LaserWeapon(LaserDestroyedOverride.CurrentSelf).Destroyed(); // Calls the original function
+}
+
+/*
+ * Frozen lightning of scavenger droids: in network mode the ammo spawns a replicated beam on the server, and the only thing that ever ends it is
+ * bHidden in the ammo's Tick. A droid killed while firing loses its weapon and ammo at once (ScavBeam has no pickup), the beam stayed in the air
+ * forever. Runs before the original, which destroys the ammo's own tracer only.
+ */
+simulated function RemoveRemoteBeam(LaserWeapon W)
+{
+	local LaserWeaponAmmo Ammo;
+
+	Ammo = LaserWeaponAmmo(W.AmmoType);
+
+	if(W.Role != ROLE_Authority || Ammo == None || Ammo.RemoteTracerEmitter == None)
+		return;
+
+	Ammo.RemoteTracerEmitter.Destroy();
+	Ammo.RemoteTracerEmitter = None;
+	Log("ModCoop: removed remote beam of " $ W);
+}
+
+// See CoopGame.IsClientMember
+function bool ChangeSquadMemberInitActionFor(ScriptedController C)
+{
+	local ACTION_ChangeSquadMember Action;
+
+	Action = ACTION_ChangeSquadMember(ChangeSquadMemberOverride.CurrentSelf);
+
+	if(Action.bAddMember && CoopGame(C.Level.Game) != None && CoopGame(C.Level.Game).IsClientMember(Action.MemberTag))
+		return false;
+
+	return Action.InitActionFor(C);
 }
 
 // Same for squad markers that a script disables and enables again (GEO_04D: the demolition charge before the spider droids)

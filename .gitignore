@@ -82,3 +82,7 @@ UpgradeLog.htm
 *.pch
 *.recipe
 *.vcxproj.user
+__pycache__/
+
+# Local test reports and logs (ModCoop)
+/ModCoop/Reports/

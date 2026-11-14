@@ -7,7 +7,7 @@ class CoopConfig extends Object config(ModCoop);
  */
 
 // Mod version. Every player must have the same build (the package GUIDs must match), so increase this with every release.
-const MOD_VERSION = "0.73";
+const MOD_VERSION = "0.8";
 
 var string               RecentAddresses[5]; // Most recent first, loaded from RecentAddressList (see LoadLists)
 // Lists are saved as one string in their own section (CoopNative.WriteSavedString): the config writer of RC comments out values
@@ -29,6 +29,16 @@ var config float ReconnectInterval;
 
 var config float ClientTimeout;  // Seconds without data from the host until the client considers the connection lost (System.ini default is 120)
 var config float ServerTimeout;  // Same on the host for clients
+var float TravelConnectTimeout;  // A client changing level waits this long for the host to finish loading
+var bool bTestSaveLoaded;        // Test engineload: the load is done, the loaded game must not save and load again
+var int TestLoads;               // Test checkpointreturn: loads of the save so far (CoopTestReload)
+var string LoadingSaveName;      // The save CoopGame loads (checkpoint or slot), for CoopNative.RemapSavedLevel
+var string LoadingSaveMap;       // Its map: the clients load this one (CoopGame.ProcessServerTravel)
+var string SessionPlayers;       // "|name|name|": who started this session in the lobby; nobody else joins until it ends (CoopGame.PreLogin)
+var string TravelPlayers;        // "|name|name|": who changed level with the host; their leaving and arriving isn't announced (CoopGame.IsQuietArrival)
+var bool bLoadingSave;           // CoopGame.LoadSavedCheckpoint started the load of the save, the next level is it
+var string CheckpointSaveLevel;  // The map the checkpoint save CoopGame.CHECKPOINT_SAVE belongs to, "" without one. Lives through level changes
+var float TravelSwitchDelay;     // Seconds between the travel order to the clients and the host's own level switch
 
 // The multiplayer defaults (10000 bytes/s per client at 20 updates per second, clients on the internet even only 5000) are far too
 // little for the dozens of AI of a campaign map: NPCs moved jerkily on clients because their positions were updated rarely
@@ -36,6 +46,7 @@ var config int NetClientRate;  // Bytes per second per client
 var config int NetTickRate;    // Server updates per second
 
 var config bool bDebugLog; // Log positions of players on server and clients to compare synchronization
+var config bool bSoundLog; // Sound journal <log>-Sounds.log on each side (CoopNative.SetSoundLog), on while Raxus and Kashyyyk are tested
 
 static function AddRecentAddress(string Address)
 {
@@ -220,6 +231,11 @@ static function ApplyClientTimeouts()
 	class'CoopNative'.static.SetNetTimeouts(default.ClientTimeout, default.ClientTimeout);
 }
 
+static function ApplyTravelTimeouts()
+{
+	class'CoopNative'.static.SetNetTimeouts(default.TravelConnectTimeout, default.TravelConnectTimeout);
+}
+
 static function BeginSession(string Address)
 {
 	ApplyClientTimeouts();
@@ -232,6 +248,7 @@ static function EndSession()
 {
 	default.ReconnectAddress = "";
 	default.ReconnectAttempts = 0;
+	default.SessionPlayers = "";
 }
 
 defaultproperties
@@ -242,6 +259,9 @@ defaultproperties
 	ReconnectInterval=5.0
 	ClientTimeout=15.0
 	ServerTimeout=30.0
+	bSoundLog=True
+	TravelConnectTimeout=60.0
+	TravelSwitchDelay=1.5
 	NetClientRate=40000
 	NetTickRate=35
 	CoopLevels(0)="GEO_01A"

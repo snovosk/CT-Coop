@@ -32,6 +32,14 @@ public:
     void execReadSavedString(FFrame& Stack, void* Result);
     void execWriteSavedString(FFrame& Stack, void* Result);
     void execInstallClientFixes(FFrame& Stack, void* Result);
+    void execSetSoundLog(FFrame& Stack, void* Result);
+    void execLogSound(FFrame& Stack, void* Result);
+    void execEngineSaveGame(FFrame& Stack, void* Result);
+    void execLevelPackageText(FFrame& Stack, void* Result);
+    void execRemapSavedLevel(FFrame& Stack, void* Result);
+    void execModPackageGuid(FFrame& Stack, void* Result);
+    void execSetVisorHUD(FFrame& Stack, void* Result);
+    void execFixLoadedLevelURL(FFrame& Stack, void* Result);
     void execSetDebugStep(FFrame& Stack, void* Result);
     void execLogSystemInfo(FFrame& Stack, void* Result);
     void execStartRelay(FFrame& Stack, void* Result);

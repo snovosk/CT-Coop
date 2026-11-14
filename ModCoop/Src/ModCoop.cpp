@@ -775,12 +775,988 @@ static void InstallSelectTargetTypeGuard()
 	debugf("ModCoop: Installed the guard of CTPlayer.SelectTargetType");
 }
 
+/*
+ * Sound journal (user, 2026-11-10: a sound stayed stuck and nobody could tell which). The natives Actor.PlaySound (native 264, called through
+ * GNatives), PlayOwnedSound and StopSound are wrapped: the first argument is read once for the line and read again by the original, the
+ * argument expressions of these calls are variables and literals. Written to its own file, flushed per line: the game may end in a crash.
+ */
+static Native  OriginalPlaySound      = NULL;
+static Native  OriginalPlayOwnedSound = NULL;
+static Native  OriginalStopSound      = NULL;
+static FArchive* GSoundLog            = NULL;
+static UBOOL   GSoundLogEnabled       = 0;
+static DOUBLE  GSoundLogStart         = 0.0;
+
+static void SoundLogLine(const TCHAR* Line)
+{
+	if(!GSoundLogEnabled)
+		return;
+
+	if(!GSoundLog)
+	{
+		FString LogName;
+
+		if(!Parse(appCmdLine(), TEXT("LOG="), LogName))
+			LogName = FString(appPackage()) + TEXT(".log");
+
+		if(LogName.Right(4) == TEXT(".log"))
+			LogName = LogName.Left(LogName.Len() - 4);
+
+		LogName += TEXT("-Sounds.log");
+		GSoundLog = GFileManager->CreateFileWriter(*LogName, FILEWRITE_EvenIfReadOnly);
+		GSoundLogStart = appSeconds();
+
+		if(!GSoundLog)
+		{
+			GSoundLogEnabled = 0;
+			debugf(NAME_Warning, "ModCoop: sound journal %s can't be written", *LogName);
+			return;
+		}
+
+		debugf("ModCoop: sound journal %s", *LogName);
+	}
+
+	FString Text = FString::Printf(TEXT("%9.2f %s\r\n"), appSeconds() - GSoundLogStart, Line);
+	GSoundLog->Serialize(const_cast<TCHAR*>(*Text), Text.Len());
+	GSoundLog->Flush();
+}
+
+static FString SoundActorText(UObject* Self)
+{
+	AActor* Actor = Cast<AActor>(Self);
+
+	if(!Actor)
+		return Self ? FString(Self->GetName()) : FString(TEXT("None"));
+
+	return FString::Printf(TEXT("%s (%s) at %.0f,%.0f,%.0f"), Actor->GetName(), Actor->GetClass()->GetName(), Actor->Location.X, Actor->Location.Y, Actor->Location.Z);
+}
+
+class UCoopSoundHook : public UObject
+{
+public:
+	void LogFirstSound(FFrame& Stack, const TCHAR* What, UObject* Extra)
+	{
+		BYTE* Code = Stack.Code;
+		P_GET_OBJECT(USound, Sound);
+		Stack.Code = Code;
+
+		if(GSoundLogEnabled)
+			SoundLogLine(*FString::Printf(TEXT("%s %s by %s%s%s"), What, Sound ? Sound->GetPathName() : TEXT("None"), *SoundActorText(this), Extra ? TEXT(" owner ") : TEXT(""), Extra ? Extra->GetName() : TEXT("")));
+	}
+
+	void execPlaySound(FFrame& Stack, void* Result)
+	{
+		LogFirstSound(Stack, TEXT("PlaySound"), NULL);
+		(this->*OriginalPlaySound)(Stack, Result);
+	}
+
+	void execPlayOwnedSound(FFrame& Stack, void* Result)
+	{
+		LogFirstSound(Stack, TEXT("PlayOwnedSound"), NULL);
+		(this->*OriginalPlayOwnedSound)(Stack, Result);
+	}
+
+	// StopSound(Actor Owner, Sound StopSound, float FadeOutTime): the sound is the second argument
+	void execStopSound(FFrame& Stack, void* Result)
+	{
+		BYTE* Code = Stack.Code;
+		P_GET_OBJECT(AActor, SoundOwner);
+		P_GET_OBJECT(USound, Sound);
+		Stack.Code = Code;
+
+		if(GSoundLogEnabled)
+			SoundLogLine(*FString::Printf(TEXT("StopSound %s of %s by %s"), Sound ? Sound->GetPathName() : TEXT("None"), *SoundActorText(SoundOwner), *SoundActorText(this)));
+
+		(this->*OriginalStopSound)(Stack, Result);
+	}
+};
+
+static void HookSoundNative(const TCHAR* Name, Native& Original, Native Replacement)
+{
+	UFunction* Function = FindField<UFunction>(AActor::StaticClass(), Name);
+
+	if(!Function || !Function->Func)
+	{
+		debugf(NAME_Warning, "ModCoop: Actor.%s not found, not in the sound journal", Name);
+		return;
+	}
+
+	if(Original)
+		return;
+
+	Original = Function->Func;
+	Function->Func = Replacement;
+
+	// A numbered native is called straight from the table by the script code
+	if(Function->iNative)
+		GNatives[Function->iNative] = Replacement;
+}
+
+static void InstallSoundHooks()
+{
+	HookSoundNative(TEXT("PlaySound"), OriginalPlaySound, static_cast<Native>(&UCoopSoundHook::execPlaySound));
+	HookSoundNative(TEXT("PlayOwnedSound"), OriginalPlayOwnedSound, static_cast<Native>(&UCoopSoundHook::execPlayOwnedSound));
+	HookSoundNative(TEXT("StopSound"), OriginalStopSound, static_cast<Native>(&UCoopSoundHook::execStopSound));
+}
+
+void UCoopNative::execSetSoundLog(FFrame& Stack, void* Result)
+{
+	P_GET_UBOOL(bEnabled);
+	P_FINISH;
+
+	GSoundLogEnabled = bEnabled;
+
+	if(bEnabled)
+		InstallSoundHooks();
+}
+
+void UCoopNative::execLogSound(FFrame& Stack, void* Result)
+{
+	P_GET_STR(Line);
+	P_FINISH;
+
+	SoundLogLine(*Line);
+}
+
+/*
+ * Research for real checkpoints. Engine.dll (2026-11-10, dumpbin): the console command SAVEGAME (UGameEngine::Exec, Engine.dll+0x11CE75) refuses
+ * when byte 0x440 of the LevelInfo (assumption: NetMode) isn't 0, then calls UGameEngine vtable slot 0x104 = Engine.dll+0x117A80 with the name.
+ * That function has no network check of its own: Client->CreateSaveContainer (WinDrv, makes the folder), LevelInfo+0x438 = 2 meanwhile,
+ * UObject::SavePackage of the level as <SavePath>/<name>/<name>.cts. The slot is called only when it points at that address.
+ */
+static const DWORD SaveGameRva   = 0x117A80;
+static const INT   SaveGameSlot  = 0x104 / sizeof(void*);
+
+typedef void (__fastcall* FEngineSaveGame)(UObject* Engine, void* Unused, const ANSICHAR* Name);
+
+static UBOOL CallSaveGame(FEngineSaveGame Func, const ANSICHAR* Name)
+{
+	__try
+	{
+		Func(GEngine, NULL, Name);
+		return 1;
+	}
+	__except(AccessViolationFilter(GetExceptionCode()))
+	{
+		return 0;
+	}
+}
+
+void UCoopNative::execEngineSaveGame(FFrame& Stack, void* Result)
+{
+	P_GET_STR(SaveName);
+	P_FINISH;
+
+	HMODULE EngineDll = GetModuleHandleA("Engine.dll");
+	FEngineSaveGame Func = GEngine ? reinterpret_cast<FEngineSaveGame>((*reinterpret_cast<void***>(GEngine))[SaveGameSlot]) : NULL;
+
+	if(!EngineDll || !Func || reinterpret_cast<BYTE*>(Func) != reinterpret_cast<BYTE*>(EngineDll) + SaveGameRva)
+	{
+		*(FString*)Result = FString::Printf(TEXT("refused: slot points to %p, expected Engine.dll+%X"), Func, SaveGameRva);
+		return;
+	}
+
+	DOUBLE Start = appSeconds();
+	UBOOL Ok = CallSaveGame(Func, appToAnsi(*SaveName));
+	FString Text = FString::Printf(TEXT("called %s in %.2f s, SavePath %s, files:"), Ok ? TEXT("ok") : TEXT("CRASHED"), appSeconds() - Start, *GSavePath);
+
+	TArray<FString> Files = GFileManager->FindFiles(*(GSavePath + TEXT("\\") + SaveName + TEXT("\\*.*")), 1, 0);
+
+	for(INT i = 0; i < Files.Num(); ++i)
+		Text += FString::Printf(TEXT(" %s (%i bytes)"), *Files[i], GFileManager->FileSize(*(GSavePath + TEXT("\\") + SaveName + TEXT("\\") + Files[i])));
+
+	*(FString*)Result = Text;
+}
+
+/*
+ * Research: the package the network announces first for a level (UGameEngine::BuildServerMasterMap, Engine.dll+0x116130: the linker of the
+ * level's outer, then ServerPackages). After a checkpoint load a client took one object for another: its level package didn't match.
+ */
+static void FillPackageText(AActor* A, FString* Out)
+{
+	UObject* Outer = (A && A->XLevel) ? A->XLevel->GetOuter() : NULL;
+
+	if(!Outer)
+	{
+		*Out = TEXT("no level");
+		return;
+	}
+
+	// UnLinker.h of these sources doesn't compile here: the outer's name and its class, then what the net driver's package map announces
+	*Out = FString::Printf(TEXT("%s (%s)"), Outer->GetPathName(), Outer->GetClass()->GetName());
+
+	// The headers' layouts don't match the binaries (this crashed): offsets from Engine.dll+0x116130 and Core.dll+0x2C9B0, 0x2CAF0.
+	// NetDriver+0x3C MasterMap; UPackageMap+0x28 List data, +0x2C count; FPackageInfo 0x40 bytes, +0x08 Parent, +0x0C Guid
+	for(TObjectIterator<UNetDriver> It; It; ++It)
+	{
+		BYTE* Map = *reinterpret_cast<BYTE**>(reinterpret_cast<BYTE*>(*It) + 0x3C);
+
+		if(!Map)
+			continue;
+
+		BYTE* Data = *reinterpret_cast<BYTE**>(Map + 0x28);
+		INT Num = (*reinterpret_cast<INT*>(Map + 0x2C) << 3) >> 3;
+		*Out += FString::Printf(TEXT(" | driver %s, %i packages:"), It->GetName(), Num);
+
+		for(INT i = 0; i < Num && i < 4; ++i)
+		{
+			BYTE* Info = Data + i * 0x40;
+			UObject* Parent = *reinterpret_cast<UObject**>(Info + 0x08);
+			DWORD* Guid = reinterpret_cast<DWORD*>(Info + 0x0C);
+			*Out += FString::Printf(TEXT(" %s %08X%08X%08X%08X"), Parent ? Parent->GetName() : TEXT("None"), Guid[0], Guid[1], Guid[2], Guid[3]);
+		}
+	}
+}
+
+// No objects with destructors in a function with __try
+static UBOOL SafePackageText(AActor* A, FString* Out)
+{
+	__try
+	{
+		FillPackageText(A, Out);
+		return 1;
+	}
+	__except(AccessViolationFilter(GetExceptionCode()))
+	{
+		return 0;
+	}
+}
+
+void UCoopNative::execLevelPackageText(FFrame& Stack, void* Result)
+{
+	P_GET_OBJECT(AActor, A);
+	P_FINISH;
+
+	FString Text;
+
+	if(!SafePackageText(A, &Text))
+		Text = TEXT("CRASHED reading the linker");
+
+	*(FString*)Result = Text;
+}
+
+/*
+ * Saves with clients (CoopGame.LoadSavedCheckpoint). Measured 2026-11-11, Reports/2026-11-10-save/RESEARCH.md:
+ * - UGameEngine::LoadMap loads the save's level from the .cts and renames its objects into the map's package (RAS_01B), whose linker stays
+ *   the clean map (.ctm): the save imports its BSP models and static mesh instances from there. The network announces that package.
+ * - UPackageMap::ObjectToIndex (Core.dll+0x2B370, vtable slot 33) numbers an object as ObjectBase of its outermost package + its linker
+ *   index, here the index in the .cts. A client resolves it in the .ctm: another object ("Forged object", crash).
+ * The fix on the host: every object of the save is paired by its full name with the export of the same name in the .ctm, and the package
+ * map's ObjectToIndex and IndexToObject (slot 34) use that index. Clients load the clean map and get the state by replication, like a
+ * player joining a running level. Objects of the save without a pair are sent as None.
+ * Offsets: FPackageInfo 0x40 bytes, +0x08 Parent, +0x24 ObjectBase, +0x28 ObjectCount; UPackageMap +0x28/+0x2C List, +0x30 master map;
+ * UGameEngine +0x118 the current level (LoadMap).
+ */
+typedef INT      (__fastcall* FObjectToIndexFunc)(void* Map, DWORD Edx, UObject* Object);
+typedef UObject* (__fastcall* FIndexToObjectFunc)(void* Map, DWORD Edx, INT Index, UBOOL bLoad);
+typedef void*    (__fastcall* FInfoGetLinkerFunc)(void* Info, DWORD Edx, DWORD LoadFlags);
+
+static FObjectToIndexFunc  OriginalObjectToIndex = NULL;
+static FIndexToObjectFunc  OriginalIndexToObject = NULL;
+static UObject*            RemapPackage = NULL;  // The level's package while the remap is active
+static void*               RemapLevel = NULL;    // The level it was made for: a level change ends it
+static TMap<UObject*, INT> RemapObjectToLocal;   // Object of the save -> export index in the .ctm, -1 = no pair
+static TArray<UObject*>    RemapLocalToObject;   // Export index in the .ctm -> object of the save
+static INT                 RemapHits = 0;
+
+static void ClearSaveRemap()
+{
+	if(RemapPackage)
+		debugf("ModCoop: save remap ended (%i objects sent by the map's numbers)", RemapHits);
+
+	RemapPackage = NULL;
+	RemapLevel = NULL;
+	RemapObjectToLocal.Empty();
+	RemapLocalToObject.Empty();
+	RemapHits = 0;
+}
+
+static UBOOL RemapActive()
+{
+	if(!RemapPackage)
+		return 0;
+
+	if(!GEngine || *reinterpret_cast<void**>(reinterpret_cast<BYTE*>(GEngine) + 0x118) != RemapLevel)
+	{
+		ClearSaveRemap();
+		return 0;
+	}
+
+	return 1;
+}
+
+static BYTE* FindRemapInfo(void* Map, UObject* Package)
+{
+	BYTE* Data = *reinterpret_cast<BYTE**>(reinterpret_cast<BYTE*>(Map) + 0x28);
+	INT Num = (*reinterpret_cast<INT*>(reinterpret_cast<BYTE*>(Map) + 0x2C) << 3) >> 3;
+
+	for(INT i = 0; i < Num; ++i)
+	{
+		if(*reinterpret_cast<UObject**>(Data + i * 0x40 + 0x08) == Package)
+			return Data + i * 0x40;
+	}
+
+	return NULL;
+}
+
+static INT __fastcall ObjectToIndexOverride(void* Map, DWORD Edx, UObject* Object)
+{
+	// Connection maps hand it to the master map (+0x30) through this slot again
+	if(Object && !*reinterpret_cast<void**>(reinterpret_cast<BYTE*>(Map) + 0x30) && RemapActive())
+	{
+		INT* Local = RemapObjectToLocal.Find(Object);
+
+		if(Local)
+		{
+			BYTE* Info = FindRemapInfo(Map, RemapPackage);
+
+			if(*Local < 0 || !Info || *Local >= *reinterpret_cast<INT*>(Info + 0x28))
+				return INDEX_NONE;
+
+			++RemapHits;
+			return *reinterpret_cast<INT*>(Info + 0x24) + *Local;
+		}
+	}
+
+	return OriginalObjectToIndex(Map, Edx, Object);
+}
+
+static UObject* __fastcall IndexToObjectOverride(void* Map, DWORD Edx, INT Index, UBOOL bLoad)
+{
+	if(!*reinterpret_cast<void**>(reinterpret_cast<BYTE*>(Map) + 0x30) && RemapActive())
+	{
+		BYTE* Info = FindRemapInfo(Map, RemapPackage);
+
+		if(Info)
+		{
+			INT Local = Index - *reinterpret_cast<INT*>(Info + 0x24);
+
+			if(Local >= 0 && Local < *reinterpret_cast<INT*>(Info + 0x28))
+			{
+				if(Local < RemapLocalToObject.Num() && RemapLocalToObject[Local])
+					return RemapLocalToObject[Local];
+
+				// Not in the save: loading it would put the clean map's object into the level a second time
+				return OriginalIndexToObject(Map, Edx, Index, 0);
+			}
+		}
+	}
+
+	return OriginalIndexToObject(Map, Edx, Index, bLoad);
+}
+
+// Engine.dll's vtables point at its import thunks (jmp dword ptr [IAT]), not at Core.dll's functions
+static void* FollowImportThunk(void* Code)
+{
+	BYTE* Bytes = reinterpret_cast<BYTE*>(Code);
+
+	if(Bytes && Bytes[0] == 0xFF && Bytes[1] == 0x25)
+		return **reinterpret_cast<void***>(Bytes + 2);
+
+	return Code;
+}
+
+static void InstallPackageMapOverride(void* Map)
+{
+	if(OriginalObjectToIndex)
+		return;
+
+	HMODULE CoreDll = GetModuleHandleA("Core.dll");
+	void* ObjectToIndex = CoreDll ? GetProcAddress(CoreDll, "?ObjectToIndex@UPackageMap@@UAEHPAVUObject@@@Z") : NULL;
+	void* IndexToObject = CoreDll ? GetProcAddress(CoreDll, "?IndexToObject@UPackageMap@@UAEPAVUObject@@HH@Z") : NULL;
+	void** VTable = *reinterpret_cast<void***>(Map);
+
+	if(!ObjectToIndex || !IndexToObject || FollowImportThunk(VTable[33]) != ObjectToIndex || FollowImportThunk(VTable[34]) != IndexToObject)
+	{
+		debugf(NAME_Warning, "ModCoop: package map slots not as measured, clients can't follow a loaded save");
+		return;
+	}
+
+	OriginalObjectToIndex = PatchVTable(Map, 33, &ObjectToIndexOverride);
+	OriginalIndexToObject = PatchVTable(Map, 34, &IndexToObjectOverride);
+	debugf("ModCoop: Installed the save remap of the package map");
+}
+
+/*
+ * Export full names of a package file, "Class Root.Outer.Name" like UObject::GetFullName. In game the engine renames loaded objects
+ * (InGameTempName), so a save's objects can only be told by their index in the save's file. Format of version 159 (SWRC), read from the
+ * files: summary tag, version, licensee, flags, then count and offset of names, exports, imports; a name is a compact index length, the
+ * characters and 4 bytes of flags; an import: class package, class name (compact), outer (int), name (compact); an export: class,
+ * super (compact), outer (int), one more compact index (unknown), name (compact), flags, size, offset (4 bytes each).
+ */
+struct FPackageReader
+{
+	const BYTE* Data;
+	INT Size, Pos;
+	UBOOL bError;
+
+	FPackageReader(const TArray<BYTE>& Bytes, INT Start) : Data(&Bytes[0]), Size(Bytes.Num()), Pos(Start), bError(Start < 0 || Start >= Bytes.Num()) {}
+
+	BYTE Byte()
+	{
+		if(Pos >= Size)
+		{
+			bError = 1;
+			return 0;
+		}
+
+		return Data[Pos++];
+	}
+
+	INT Int()
+	{
+		INT Value = Byte();
+		Value |= Byte() << 8;
+		Value |= Byte() << 16;
+		Value |= Byte() << 24;
+		return Value;
+	}
+
+	INT Compact()
+	{
+		BYTE B = Byte();
+		UBOOL bNegative = (B & 0x80) != 0;
+		INT Value = B & 0x3F;
+
+		if(B & 0x40)
+		{
+			INT Shift = 6;
+
+			do
+			{
+				B = Byte();
+				Value |= (B & 0x7F) << Shift;
+				Shift += 7;
+			} while((B & 0x80) && Shift < 32 && !bError);
+		}
+
+		return bNegative ? -Value : Value;
+	}
+};
+
+static UBOOL ReadExportFullNames(const TCHAR* Filename, const TCHAR* Root, TArray<FString>& Out)
+{
+	TArray<BYTE> Bytes;
+
+	if(!appLoadFileToArray(Bytes, Filename) || Bytes.Num() < 36)
+		return 0;
+
+	FPackageReader Header(Bytes, 8);
+	Header.Int();  // Package flags
+	INT NameCount = Header.Int(), NameOffset = Header.Int(), ExportCount = Header.Int(), ExportOffset = Header.Int();
+	INT ImportCount = Header.Int(), ImportOffset = Header.Int();
+
+	if(NameCount <= 0 || ExportCount <= 0 || ImportCount < 0 || NameCount > 1000000 || ExportCount > 1000000 || ImportCount > 1000000)
+		return 0;
+
+	TArray<FString> Names;
+	FPackageReader R(Bytes, NameOffset);
+
+	for(INT i = 0; i < NameCount && !R.bError; ++i)
+	{
+		INT Length = R.Compact();
+
+		if(Length < 0 || R.Pos + Length > R.Size)
+			return 0;
+
+		FString Name;
+
+		for(INT c = 0; c < Length && R.Data[R.Pos + c]; ++c)
+			Name += FString::Printf(TEXT("%c"), (TCHAR)R.Data[R.Pos + c]);
+
+		R.Pos += Length;
+		R.Int();
+		new(Names) FString(Name);
+	}
+
+	TArray<INT> ImportNames;
+	FPackageReader I(Bytes, ImportOffset);
+
+	for(INT i = 0; i < ImportCount && !I.bError; ++i)
+	{
+		I.Compact();
+		I.Compact();
+		I.Int();
+		ImportNames.AddItem(I.Compact());
+	}
+
+	TArray<INT> ExportClasses, ExportOuters, ExportNames;
+	FPackageReader E(Bytes, ExportOffset);
+
+	for(INT i = 0; i < ExportCount && !E.bError; ++i)
+	{
+		ExportClasses.AddItem(E.Compact());
+		E.Compact();
+		ExportOuters.AddItem(E.Int());
+		E.Compact();
+		ExportNames.AddItem(E.Compact());
+		E.Int();
+		E.Int();
+		E.Int();
+	}
+
+	if(R.bError || I.bError || E.bError)
+		return 0;
+
+	for(INT i = 0; i < ExportCount; ++i)
+	{
+		if(ExportNames[i] < 0 || ExportNames[i] >= NameCount)
+			return 0;
+	}
+
+	Out.Empty();
+
+	for(INT i = 0; i < ExportCount; ++i)
+	{
+		FString Path = Names[ExportNames[i]];
+		INT Outer = ExportOuters[i];
+
+		for(INT Depth = 0; Outer > 0 && Outer <= ExportCount && Depth < 64; ++Depth)
+		{
+			Path = Names[ExportNames[Outer - 1]] + TEXT(".") + Path;
+			Outer = ExportOuters[Outer - 1];
+		}
+
+		INT Class = ExportClasses[i];
+		FString ClassName = TEXT("Class");
+
+		if(Class < 0 && -Class - 1 < ImportNames.Num() && ImportNames[-Class - 1] >= 0 && ImportNames[-Class - 1] < NameCount)
+			ClassName = Names[ImportNames[-Class - 1]];
+		else if(Class > 0 && Class <= ExportCount)
+			ClassName = Names[ExportNames[Class - 1]];
+
+		new(Out) FString(ClassName + TEXT(" ") + Root + TEXT(".") + Path);
+	}
+
+	return 1;
+}
+
+static void BuildSaveRemap(AActor* A, const FString& SaveFile, FString* Out)
+{
+	ClearSaveRemap();
+
+	ULevel* Level = A ? A->XLevel : NULL;
+	UObject* Package = Level ? (UObject*)Level->GetPackage() : NULL;
+	void* Map = NULL;
+
+	for(TObjectIterator<UNetDriver> It; It && !Map; ++It)
+		Map = *reinterpret_cast<void**>(reinterpret_cast<BYTE*>(*It) + 0x3C);
+
+	if(!Package || !Map)
+	{
+		*Out = TEXT("no level or no net driver");
+		return;
+	}
+
+	BYTE* Info = FindRemapInfo(Map, Package);
+	HMODULE CoreDll = GetModuleHandleA("Core.dll");
+	FInfoGetLinkerFunc InfoGetLinker = (FInfoGetLinkerFunc)GetProcAddress(CoreDll, "?GetLinker@FPackageInfo@@QBEPAVULinkerLoad@@K@Z");
+	void* MapLinker = (Info && InfoGetLinker) ? InfoGetLinker(Info, 0, 0x10) : NULL;
+
+	if(!Info || !MapLinker)
+	{
+		*Out = FString::Printf(TEXT("package %s not in the package map or no linker"), Package->GetName());
+		return;
+	}
+
+	// Both tables from the files: the save's linker is gone after the load, and objects in game are called InGameTempName
+	INT Count = *reinterpret_cast<INT*>(Info + 0x28);
+	FString MapFile = FString(TEXT("..\\Maps\\")) + Package->GetName() + TEXT(".ctm");
+	TArray<FString> MapNames, SaveNames;
+
+	if(!ReadExportFullNames(*MapFile, Package->GetName(), MapNames) || MapNames.Num() != Count)
+	{
+		*Out = FString::Printf(TEXT("can't read %s or its %i exports aren't the %i of the package map"), *MapFile, MapNames.Num(), Count);
+		return;
+	}
+
+	if(!ReadExportFullNames(*SaveFile, Package->GetName(), SaveNames))
+	{
+		*Out = FString::Printf(TEXT("can't read %s"), *SaveFile);
+		return;
+	}
+
+	TMap<FString, INT> MapExports;
+
+	for(INT i = 0; i < MapNames.Num(); ++i)
+		MapExports.Set(*MapNames[i], i);
+
+	INT Paired = 0, Unpaired = 0, ClassMismatch = 0, FromMap = 0;
+	FString FirstUnpaired, FirstPaired, FirstMismatch;
+	RemapLocalToObject.AddZeroed(Count);
+
+	for(FObjectIterator It; It; ++It)
+	{
+		UObject* Object = *It;
+
+		// After the load the save's linker is gone, its objects keep their index in it (what ObjectToIndex uses)
+		if((UObject*)Object->GetPackage() != Package || Object->GetLinkerIndex() == INDEX_NONE)
+			continue;
+
+		if((void*)Object->GetLinker() == MapLinker)
+		{
+			++FromMap;
+			continue;
+		}
+
+		INT Index = Object->GetLinkerIndex();
+		FString ClassPrefix = FString(Object->GetClass()->GetName()) + TEXT(" ");
+
+		// The class has to be the one of that export in the save: anything else isn't from the save
+		if(Index >= SaveNames.Num() || SaveNames[Index].Left(ClassPrefix.Len()) != ClassPrefix)
+		{
+			if(!ClassMismatch++)
+				FirstMismatch = FString::Printf(TEXT("%s index %i"), Object->GetFullName(), Index);
+
+			continue;
+		}
+
+		INT* Local = MapExports.Find(*SaveNames[Index]);
+
+		if(Local)
+		{
+			RemapObjectToLocal.Set(Object, *Local);
+			RemapLocalToObject[*Local] = Object;
+
+			if(!Paired++)
+				FirstPaired = FString::Printf(TEXT("%s %i -> %i"), *SaveNames[Index], Index, *Local);
+		}
+		else
+		{
+			RemapObjectToLocal.Set(Object, INDEX_NONE);
+
+			if(!Unpaired++)
+				FirstUnpaired = SaveNames[Index];
+		}
+	}
+
+	InstallPackageMapOverride(Map);
+
+	// A level loaded from its map (PostLoadBeginPlay runs then too) has nothing to remap
+	if(Paired > 0)
+	{
+		RemapPackage = Package;
+		RemapLevel = Level;
+	}
+	else
+		ClearSaveRemap();
+
+	*Out = FString::Printf(TEXT("%s: %i exports in the map, %i in the save; %i objects paired (first: %s), %i without a pair (first: %s), %i of another class (first: %s), %i from the map%s"),
+	                       Package->GetName(), Count, SaveNames.Num(), Paired, Paired ? *FirstPaired : TEXT("none"), Unpaired, Unpaired ? *FirstUnpaired : TEXT("none"),
+	                       ClassMismatch, ClassMismatch ? *FirstMismatch : TEXT("none"), FromMap, OriginalObjectToIndex ? TEXT("") : TEXT(", NOT INSTALLED"));
+}
+
+// No objects with destructors in a function with __try
+static UBOOL SafeBuildSaveRemap(AActor* A, const FString& SaveFile, FString* Out)
+{
+	__try
+	{
+		BuildSaveRemap(A, SaveFile, Out);
+		return 1;
+	}
+	__except(AccessViolationFilter(GetExceptionCode()))
+	{
+		RemapPackage = NULL;
+		return 0;
+	}
+}
+
+/*
+ * The single player HUD in coop (the visor). The helmet draws it when the option bVisor is on, the screen isn't split and LevelInfo.NetMode
+ * (byte 0x440) is 0: in network games never, for the host neither. Three helmet functions read NetMode for it (scan of the helmet's code for byte
+ * reads and compares of [reg+0x440] in all of Engine.dll, 2026-11-11): DrawStanceText (RVA 0x12D9D3), DrawHUD (0x130D8E: frame, layout, bars, 16 places depend on it) and
+ * DrawHelmet (0x136118: the helmet around the view); each mov al,[reg+0x440] becomes xor al,al (as standalone). A fourth one compares:
+ * FPlayerSceneNode::Render (0x1B1824, cmp [ecx+0x440],dl) decides whether the world goes to the working target the helmet bends onto the
+ * visor; without it the world was drawn straight and the helmet put an old copy over it (the picture was doubled, test 2026-11-11). It
+ * becomes cmp dl,dl. All while a coop HUD exists (CoopHUD), put back after it, so other games keep theirs. The bytes are checked first.
+ */
+struct FVisorCheck
+{
+	DWORD RVA;
+	BYTE Original[6];
+	BYTE Patched[6];
+};
+
+static const FVisorCheck VisorChecks[] =
+{
+	{0x12D9D3, {0x8A, 0x82, 0x40, 0x04, 0x00, 0x00}, {0x32, 0xC0, 0x90, 0x90, 0x90, 0x90}},
+	{0x130D8E, {0x8A, 0x81, 0x40, 0x04, 0x00, 0x00}, {0x32, 0xC0, 0x90, 0x90, 0x90, 0x90}},
+	{0x136118, {0x8A, 0x81, 0x40, 0x04, 0x00, 0x00}, {0x32, 0xC0, 0x90, 0x90, 0x90, 0x90}},
+	{0x1B1824, {0x38, 0x91, 0x40, 0x04, 0x00, 0x00}, {0x38, 0xD2, 0x90, 0x90, 0x90, 0x90}},
+};
+
+/*
+ * In visor mode FPlayerSceneNode::Render draws the helmet's HUD into a working target (call of UHelmet::DrawHUD at RVA 0x1B1EA1) that
+ * DrawHelmet then bends onto the visor and moves with the head. Script HUDs draw later, straight on the screen: the squad icons of CoopHUD
+ * stayed flat beside the helmet's own (test 2026-11-11). That call goes to DrawHUDInWorkingTarget instead, which after the helmet calls
+ * CoopHUD.DrawVisorSquad with the viewport's canvas: the helmet draws through the same FCanvasUtil (UCanvas+0x88), so the icons land in
+ * the working target too. Offsets measured: UViewport+0x60 Canvas.
+ */
+typedef void (__fastcall* FDrawHUDFunc)(void* Helmet, DWORD Edx, void* Viewport, void* RI);
+
+static const DWORD DrawHUDCallRVA = 0x1B1EA1;
+static const DWORD DrawHUDRVA = 0x130B60;
+static UObject* VisorHUD = NULL;  // CoopHUD of this machine while the visor HUD is on (SetVisorHUD)
+
+static void __fastcall DrawHUDInWorkingTarget(void* Helmet, DWORD Edx, void* Viewport, void* RI)
+{
+	reinterpret_cast<FDrawHUDFunc>(reinterpret_cast<BYTE*>(GetModuleHandleA("Engine.dll")) + DrawHUDRVA)(Helmet, Edx, Viewport, RI);
+
+	UObject* Canvas = Viewport ? *reinterpret_cast<UObject**>(reinterpret_cast<BYTE*>(Viewport) + 0x60) : NULL;
+
+	if(!VisorHUD || !Canvas || VisorHUD->IsPendingKill())
+		return;
+
+	static FName NDrawVisorSquad(TEXT("DrawVisorSquad"));
+	UFunction* Function = VisorHUD->FindFunction(NDrawVisorSquad);
+
+	if(Function)
+	{
+		struct { UObject* C; } Parms;
+		Parms.C = Canvas;
+		VisorHUD->ProcessEvent(Function, &Parms);
+	}
+}
+
+// The call of DrawHUD at RVA 0x1B1EA1 to DrawHUDInWorkingTarget and back. E8 rel32, checked first
+static FString SetDrawHUDCall(UBOOL bOn)
+{
+	BYTE* EngineBase = reinterpret_cast<BYTE*>(GetModuleHandleA("Engine.dll"));
+
+	if(!EngineBase)
+		return TEXT(" call: no Engine.dll");
+
+	BYTE* Call = EngineBase + DrawHUDCallRVA;
+	BYTE* Original = EngineBase + DrawHUDRVA;
+	BYTE* Target = bOn ? reinterpret_cast<BYTE*>(&DrawHUDInWorkingTarget) : Original;
+	INT Current = *reinterpret_cast<INT*>(Call + 1);
+
+	if(Call[0] != 0xE8 || (Call + 5 + Current != Original && Call + 5 + Current != reinterpret_cast<BYTE*>(&DrawHUDInWorkingTarget)))
+		return TEXT(" call: unexpected bytes, not changed");
+
+	DWORD OldProtect;
+
+	if(!VirtualProtect(Call, 5, PAGE_EXECUTE_READWRITE, &OldProtect))
+		return TEXT(" call: VirtualProtect failed");
+
+	*reinterpret_cast<INT*>(Call + 1) = static_cast<INT>(Target - (Call + 5));
+	VirtualProtect(Call, 5, OldProtect, &OldProtect);
+	FlushInstructionCache(GetCurrentProcess(), Call, 5);
+	return bOn ? TEXT(" call on") : TEXT(" call off");
+}
+
+/*
+ * Names over the squad (SEV, FIXER): APawn::PostRender (Engine.dll RVA 0x189C90) draws a member's GetHudNickname when it is in the AI squad
+ * of the viewer (PlayerController.Pawn.Squad, Pawn+0x440, ASquad member index at RVA 0x2A430) and is targeted, or always in tactical vision.
+ * Clients have no squad and the host's squad doesn't hold the members played by clients: no names in coop (2026-11-12). The squad check
+ * (RVA 0x189CF7, 18 bytes: mov eax,[eax+0x440]; test; je; push edi; mov ecx,eax; call index) becomes push edi; push eax; call
+ * CoopSquadIndex; nops: a member of the squad as before, and in coop every other Delta commando counts. On and off with the visor HUD.
+ */
+typedef INT (__fastcall* FSquadIndexFunc)(void* Squad, DWORD Edx, AActor* Member);
+
+static const DWORD SquadCheckRVA = 0x189CF7;
+static const DWORD SquadIndexRVA = 0x2A430;
+static const BYTE SquadCheckOriginal[18] = {0x8B, 0x80, 0x40, 0x04, 0x00, 0x00, 0x85, 0xC0, 0x74, 0x32, 0x57, 0x8B, 0xC8, 0xE8, 0x27, 0x07, 0xEA, 0xFF};
+static UClass* CloneCommandoClass = NULL;
+
+static INT __stdcall CoopSquadIndex(BYTE* Viewer, AActor* Member)
+{
+	void* Squad = Viewer ? *reinterpret_cast<void**>(Viewer + 0x440) : NULL;
+
+	if(Squad)
+	{
+		INT Index = reinterpret_cast<FSquadIndexFunc>(reinterpret_cast<BYTE*>(GetModuleHandleA("Engine.dll")) + SquadIndexRVA)(Squad, 0, Member);
+
+		if(Index >= 0)
+			return Index;
+	}
+
+	if(!CloneCommandoClass)
+		CloneCommandoClass = FindObject<UClass>(ANY_PACKAGE, TEXT("CloneCommando"));
+
+	if(Member && reinterpret_cast<BYTE*>(Member) != Viewer && CloneCommandoClass && Member->IsA(CloneCommandoClass) && !Member->bDeleteMe)
+		return 1;
+
+	return INDEX_NONE;
+}
+
+static FString SetSquadNames(UBOOL bOn)
+{
+	BYTE* EngineBase = reinterpret_cast<BYTE*>(GetModuleHandleA("Engine.dll"));
+
+	if(!EngineBase)
+		return TEXT(" names: no Engine.dll");
+
+	BYTE* Code = EngineBase + SquadCheckRVA;
+	BYTE Patched[18];
+	Patched[0] = 0x57;  // push edi (the pawn drawn)
+	Patched[1] = 0x50;  // push eax (the viewer's pawn)
+	Patched[2] = 0xE8;  // call CoopSquadIndex
+	*reinterpret_cast<INT*>(Patched + 3) = static_cast<INT>(reinterpret_cast<BYTE*>(&CoopSquadIndex) - (Code + 7));
+
+	for(INT i = 7; i < 18; ++i)
+		Patched[i] = 0x90;
+
+	const BYTE* To = bOn ? Patched : SquadCheckOriginal;
+	const BYTE* From = bOn ? SquadCheckOriginal : Patched;
+
+	if(appMemcmp(Code, To, 18) == 0)
+		return TEXT(" names already");
+
+	if(appMemcmp(Code, From, 18) != 0)
+		return TEXT(" names: unexpected bytes, not changed");
+
+	DWORD OldProtect;
+
+	if(!VirtualProtect(Code, 18, PAGE_EXECUTE_READWRITE, &OldProtect))
+		return TEXT(" names: VirtualProtect failed");
+
+	appMemcpy(Code, To, 18);
+	VirtualProtect(Code, 18, OldProtect, &OldProtect);
+	FlushInstructionCache(GetCurrentProcess(), Code, 18);
+	return bOn ? TEXT(" names on") : TEXT(" names off");
+}
+
+void UCoopNative::execSetVisorHUD(FFrame& Stack, void* Result)
+{
+	P_GET_UBOOL(bOn);
+	P_GET_OBJECT_OPTX(UObject, HUD, NULL);
+	P_FINISH;
+
+	FString Text;
+	VisorHUD = bOn ? HUD : NULL;
+	BYTE* EngineBase = reinterpret_cast<BYTE*>(GetModuleHandleA("Engine.dll"));
+
+	for(INT i = 0; EngineBase && i < ARRAY_COUNT(VisorChecks); ++i)
+	{
+		BYTE* Code = EngineBase + VisorChecks[i].RVA;
+		const BYTE* From = bOn ? VisorChecks[i].Original : VisorChecks[i].Patched;
+		const BYTE* To = bOn ? VisorChecks[i].Patched : VisorChecks[i].Original;
+		DWORD OldProtect;
+
+		if(appMemcmp(Code, To, 6) == 0)
+			Text += FString::Printf(TEXT(" %X already"), VisorChecks[i].RVA);
+		else if(appMemcmp(Code, From, 6) != 0)
+			Text += FString::Printf(TEXT(" %X unexpected bytes, not changed"), VisorChecks[i].RVA);
+		else if(!VirtualProtect(Code, 6, PAGE_EXECUTE_READWRITE, &OldProtect))
+			Text += FString::Printf(TEXT(" %X VirtualProtect failed"), VisorChecks[i].RVA);
+		else
+		{
+			appMemcpy(Code, To, 6);
+			VirtualProtect(Code, 6, OldProtect, &OldProtect);
+			FlushInstructionCache(GetCurrentProcess(), Code, 6);
+			Text += FString::Printf(TEXT(" %X %s"), VisorChecks[i].RVA, bOn ? TEXT("on") : TEXT("off"));
+		}
+	}
+
+	Text += SetDrawHUDCall(bOn);
+	Text += SetSquadNames(bOn);
+	*(FString*)Result = Text;
+}
+
+/*
+ * After a save is loaded the level keeps the URL that was saved with it: UGameEngine::LoadMap copies the travel URL into ULevel::URL
+ * (offset 0x44, Engine.dll+0x11EE78) only without the option "load". The saved one has the host 0.0.0.0 of the listening server, so the
+ * next level change, relative to it, went to 0.0.0.0/<map> as a client and the level never changed (the user's game RAS_03C, 2026-11-11).
+ * The host part is cleared, like the URL of a map loaded the normal way. Returns what it was.
+ */
+void UCoopNative::execFixLoadedLevelURL(FFrame& Stack, void* Result)
+{
+	P_GET_OBJECT(AActor, A);
+	P_FINISH;
+
+	if(!A || !A->XLevel)
+	{
+		*(FString*)Result = TEXT("no level");
+		return;
+	}
+
+	FURL* URL = reinterpret_cast<FURL*>(reinterpret_cast<BYTE*>(A->XLevel) + 0x44);
+	FString Text = FString::Printf(TEXT("host '%s' port %i map '%s'"), *URL->Host, URL->Port, *URL->Map);
+	URL->Host = TEXT("");
+	*(FString*)Result = Text;
+}
+
+/*
+ * The GUID of this build of ModCoop.u, from its file (bytes 36-51 of the package summary, version 159). A save holds objects of the mod:
+ * a save from another build is refused (CoopSaveSlots.IsCompatible).
+ */
+void UCoopNative::execModPackageGuid(FFrame& Stack, void* Result)
+{
+	P_FINISH;
+
+	static FString Cached;
+
+	if(Cached.Len() == 0)
+	{
+		TArray<BYTE> Bytes;
+
+		if(appLoadFileToArray(Bytes, TEXT("ModCoop.u")) && Bytes.Num() >= 52)
+		{
+			for(INT i = 36; i < 52; ++i)
+				Cached += FString::Printf(TEXT("%02X"), Bytes[i]);
+		}
+	}
+
+	*(FString*)Result = Cached;
+}
+
+void UCoopNative::execRemapSavedLevel(FFrame& Stack, void* Result)
+{
+	P_GET_OBJECT(AActor, A);
+	P_GET_STR(SaveName);
+	P_FINISH;
+
+	FString Text;
+	FString SaveFile = GSavePath + TEXT("\\") + SaveName + TEXT("\\") + SaveName + TEXT(".cts");
+
+	if(!SafeBuildSaveRemap(A, SaveFile, &Text))
+		Text = TEXT("CRASHED");
+
+	*(FString*)Result = Text;
+}
+
+// A level change ends the remap of a loaded save (its objects go away)
+typedef ULevel* (__fastcall* FLoadMapFunc)(UObject* Engine, DWORD Edx, const FURL& URL, UPendingLevel* Pending, const void* TravelInfo, FString& Error, UBOOL bSomething);
+
+static FLoadMapFunc OriginalLoadMap = NULL;
+
+static ULevel* __fastcall LoadMapOverride(UObject* Engine, DWORD Edx, const FURL& URL, UPendingLevel* Pending, const void* TravelInfo, FString& Error, UBOOL bSomething)
+{
+	ClearSaveRemap();
+	return OriginalLoadMap(Engine, Edx, URL, Pending, TravelInfo, Error, bSomething);
+}
+
+static void InstallLoadMapOverride()
+{
+	HMODULE EngineDll = GetModuleHandleA("Engine.dll");
+	void* LoadMap = EngineDll ? GetProcAddress(EngineDll, "?LoadMap@UGameEngine@@UAEPAVULevel@@ABVFURL@@PAVUPendingLevel@@PBV?$TMap@VFString@@V1@@@AAVFString@@_N@Z") : NULL;
+
+	if(OriginalLoadMap || !GEngine || !LoadMap)
+		return;
+
+	void** VTable = *reinterpret_cast<void***>(GEngine);
+
+	for(INT i = 0; i < 128; ++i)
+	{
+		if(VTable[i] == LoadMap)
+		{
+			OriginalLoadMap = PatchVTable(GEngine, i, &LoadMapOverride);
+			debugf("ModCoop: Installed the LoadMap hook (UGameEngine vtable slot %i)", i);
+			return;
+		}
+	}
+
+	debugf(NAME_Warning, "ModCoop: UGameEngine::LoadMap slot not found");
+}
+
 void UCoopNative::execInstallClientFixes(FFrame& Stack, void* Result)
 {
 	P_FINISH;
 
 	InstallCrashLog();
 	InstallSelectTargetTypeGuard();
+	InstallLoadMapOverride();
 
 	static UBOOL Installed = 0;
 

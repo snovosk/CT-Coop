@@ -4,8 +4,8 @@ class CoopEndLift extends Object;
  * CoopEndLift
  * Purpose: the lifts that end a level (GEO_04D, GEO_05B) wait for the whole squad. The trigger in the car starts them as soon as the
  *   host steps in and the next level loads at the top: clients and squad members were left behind (GEO_05B, checklist 2026-11-01).
- *   The trigger is held back until all players and all squad members that can walk stand on the lift. Players who are missing get a
- *   hint with their number; squad members the AI plays are put on the lift if they aren't there soon after the last player.
+ *   The trigger is held back until the host and all squad members that can walk stand on the lift; squad members the AI plays are put
+ *   on it if they aren't there soon after the host. Clients aren't waited for: the lift ends in the level change, which takes everybody.
  *   The lifts inside a level (GEO_05A, GEO_05B) start with the first player: a client who came first left the host behind with no way up (GEO_05A,
  *   session 2026-11-02). IsSharedLift names them, CoopGame.CheckLiftRides brings the other players to whoever rides. Their triggers cover only a part
  *   of the car (GEO_05A Lift01: the far wall), a client stood on the car and nothing happened (session 2026-11-02): standing on the car starts them too.
@@ -20,6 +20,9 @@ class CoopEndLift extends Object;
 const HINT_INTERVAL = 4.0;
 const MEMBER_WAIT = 10.0;
 const SHARED_LIFT_STAND = 1.5;
+const START_LIFT_DELAY = 3.0;     // After every client has its pawn
+const START_LIFT_MAX_HOLD = 30.0;
+const START_LIFT_POLL = 0.5;
 
 var CoopGame Game;
 var Trigger Gate;
@@ -36,6 +39,10 @@ struct SharedLift
 };
 
 var array<SharedLift> SharedLifts;
+
+// See ShouldHoldStartLift
+var float StartLiftHoldStart, StartLiftReadyTime;
+var bool bStartLiftReleased;
 
 function Setup(CoopGame G, string MapName)
 {
@@ -167,6 +174,70 @@ function CheckSharedLifts()
 	}
 }
 
+/*
+ * A level that starts on a moving lift (RAS_03B: the elevator script moves the car as the level starts, PlayerStart is attached to it). A client got
+ * its squad member while the car was already going down and fell off it, from its side it flew up (session 2026-11-10). The level script's
+ * ACTION_MoverToKeyframe waits here until every client has its pawn, then START_LIFT_DELAY more. CoopExtension makes the script wait.
+ */
+function bool ShouldHoldStartLift(ACTION_MoverToKeyframe Action)
+{
+	local Mover M;
+	local NavigationPoint N;
+	local Controller C;
+	local bool bStartLift, bReady;
+
+	if(bStartLiftReleased || Action.MoverTag == '' || Action.MoverTag == 'None')
+		return false;
+
+	foreach Game.AllActors(class'Mover', M, Action.MoverTag)
+	{
+		if(M.KeyNum != 0 || M.bInterpolating)
+			continue;
+
+		foreach Game.AllActors(class'NavigationPoint', N)
+		{
+			if(PlayerStart(N) != None && N.Base == M)
+				bStartLift = true;
+		}
+	}
+
+	if(!bStartLift)
+		return false;
+
+	if(StartLiftHoldStart == 0)
+	{
+		StartLiftHoldStart = Game.Level.TimeSeconds;
+		Log("CoopGame: start lift " $ Action.MoverTag $ " held until the clients stand on it");
+	}
+
+	bReady = !Game.bWaitingForClients;
+
+	for(C = Game.Level.ControllerList; C != None && bReady; C = C.nextController)
+	{
+		if(CoopPlayer(C) != None && !Game.IsHost(C) && (C.Pawn == None || C.Pawn.Health <= 0 || C.Pawn.Physics == PHYS_Falling))
+			bReady = false;
+	}
+
+	if(!bReady)
+		StartLiftReadyTime = 0;
+	else if(StartLiftReadyTime == 0)
+		StartLiftReadyTime = Game.Level.TimeSeconds;
+
+	if((bReady && Game.Level.TimeSeconds - StartLiftReadyTime >= START_LIFT_DELAY) || Game.Level.TimeSeconds - StartLiftHoldStart >= START_LIFT_MAX_HOLD)
+	{
+		Log("CoopGame: start lift " $ Action.MoverTag $ " released after " $ (Game.Level.TimeSeconds - StartLiftHoldStart) $ " s, clients ready " $ bReady);
+		bStartLiftReleased = true;
+		return false;
+	}
+
+	return true;
+}
+
+function float StartLiftPoll()
+{
+	return START_LIFT_POLL;
+}
+
 function bool IsHeld(Trigger T)
 {
 	return T == Gate && !bStarted;
@@ -204,9 +275,6 @@ function Check()
 	local PlayerController Host;
 	local Pawn P, Aboard;
 	local int Missing, Bots, Players;
-	local bool bHostSeen;
-	local string Hint;
-	local color HintColor;
 
 	CheckSharedLifts();
 
@@ -233,7 +301,6 @@ function Check()
 			continue;
 
 		++Players;
-		bHostSeen = bHostSeen || C == Host;
 
 		if(IsOnLift(C.Pawn))
 			Aboard = C.Pawn;
@@ -241,8 +308,10 @@ function Check()
 			++Missing;
 	}
 
-	// Nobody has come to the lift yet
-	if(Aboard == None || !bHostSeen)
+	// The lift carries its riders into the level change (GEO_04D Teleporter2, GEO_05B Teleporter1) and every player goes to the next
+	// level wherever they stand: only the host is waited for. Waiting for every player in the small car locked the game: the host in the
+	// doorway, a client couldn't get in (GEO_04D, the tester's game on 0.73, 2026-11-13)
+	if(Host == None || !IsOnLift(Host.Pawn))
 	{
 		PlayersAboardTime = 0;
 		return;
@@ -255,34 +324,9 @@ function Check()
 	}
 
 	if(Missing != LastMissing)
-		Log("CoopGame: end lift waits for " $ Missing $ " of " $ Players $ " players and " $ Bots $ " squad members");
+		Log("CoopGame: end lift: the host is on it, " $ Missing $ " of " $ Players $ " players and " $ Bots $ " squad members aren't");
 
 	LastMissing = Missing;
-
-	if(Missing > 0)
-	{
-		PlayersAboardTime = 0;
-
-		if(Game.Level.TimeSeconds >= NextHint)
-		{
-			NextHint = Game.Level.TimeSeconds + HINT_INTERVAL;
-			Hint = "The lift is waiting for " $ Missing $ " more player(s)";
-			HintColor.R = 255;
-			HintColor.G = 255;
-			HintColor.B = 255;
-			HintColor.A = 255;
-
-			for(C = Game.Level.ControllerList; C != None; C = C.nextController)
-			{
-				if(PlayerController(C) != None && PlayerController(C).myHUD != None && Viewport(PlayerController(C).Player) != None)
-					PlayerController(C).myHUD.AddCriticalMessage(Hint, HINT_INTERVAL, HintColor);
-				else if(CoopPlayer(C) != None)
-					CoopPlayer(C).ClientCoopCriticalMessage(Hint, HINT_INTERVAL, HintColor);
-			}
-		}
-
-		return;
-	}
 
 	if(Bots > 0)
 	{
@@ -292,10 +336,10 @@ function Check()
 		if(Game.Level.TimeSeconds - PlayersAboardTime < MEMBER_WAIT)
 			return;
 
-		PutBotsOnLift(Host.Pawn, Aboard);
+		PutBotsOnLift(Host.Pawn, Host.Pawn);
 	}
 
-	Log("CoopGame: end lift starts with all " $ Players $ " players");
+	Log("CoopGame: end lift starts with the host, " $ (Players - Missing) $ " of " $ Players $ " players on it");
 	bStarted = true;
 	Gate.TriggerEvent(Gate.Event, Gate, Host.Pawn);
 }

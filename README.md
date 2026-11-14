@@ -18,7 +18,7 @@ The following projects are part of the Visual Studio solution and built by defau
 	This is a server only mod. The clients don't need to have anything installed.
 * __ModCoop__  
 	Campaign coop for 2-4 players on a listen server (host-authoritative). Requires Mod and CT.exe on every machine.
-	See `ModCoop/Dist/README.md` (players, Russian) and `ModCoop/Dist/DEVLOG.md` (implementation notes). The release archive is created with `ModCoop/package.ps1`.
+	See `ModCoop/Dist/README.md` (players), `ModCoop/ARCHITECTURE.md`, `ModCoop/CONVENTIONS.md`, `ModCoop/TESTING.md` and `ModCoop/Dist/DEVLOG.md` (implementation notes). The release archive is created with `ModCoop/package.ps1`.
 * __OpenGLDrv__  
 	An OpenGL 4.5 renderer.
 * __ModEd__  

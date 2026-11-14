@@ -24,6 +24,8 @@ var bool bMusicLogged;
 
 simulated function Init(string Args)
 {
+	local int i;
+
 	Super.Init(Args);
 
 	OpenTime = GetPlayerOwner().Level.TimeSeconds;
@@ -45,19 +47,23 @@ simulated function Init(string Args)
 	Options[OPTION_PLAYERS].Items[3] = MemberNames[3];
 	Options[OPTION_PLAYERS].Current = 0;
 
-	// The host plays 38 and only picks the level, the clients pick a member
+	// The host plays 38: his second row is the number of players (the host menu has no rows), the clients pick a member there
 	if(bIsHost)
 	{
-		Options[OPTION_PLAYERS].Items.Length = 1;
-		Options[OPTION_PLAYERS].Items[0] = "38 BOSS";
-		OptionLeftArrows[OPTION_PLAYERS].bHidden = 1;
-		OptionRightArrows[OPTION_PLAYERS].bHidden = 1;
+		OptionLabels[OPTION_PLAYERS].Text = "MAX PLAYERS";
+		Options[OPTION_PLAYERS].Items.Length = 3;
+		Options[OPTION_PLAYERS].Items[0] = "2";
+		Options[OPTION_PLAYERS].Items[1] = "3";
+		Options[OPTION_PLAYERS].Items[2] = "4";
+		ShowMaxPlayers();
 		FocusOnWidget(Options[OPTION_LEVEL]);
 	}
 	else
 	{
 		OptionLeftArrows[OPTION_LEVEL].bHidden = 1;
 		OptionRightArrows[OPTION_LEVEL].bHidden = 1;
+		OptionLeftArrows[OPTION_SAVE].bHidden = 1;
+		OptionRightArrows[OPTION_SAVE].bHidden = 1;
 		FocusOnWidget(Options[OPTION_PLAYERS]);
 	}
 
@@ -80,13 +86,26 @@ simulated function CoopPlayer Me()
 
 simulated function ChangeOption(int i, int Delta)
 {
-	if(i == OPTION_LEVEL && !bIsHost || i == OPTION_PLAYERS && bIsHost)
+	if((i == OPTION_LEVEL || i == OPTION_SAVE) && !bIsHost)
 		return;
 
 	Super.ChangeOption(i, Delta);
 
-	if(i == OPTION_LEVEL)
+	// The host is the server: the limit is set right here, never below the players already in the lobby
+	if(i == OPTION_PLAYERS && bIsHost)
+	{
+		if(CoopGame(GetPlayerOwner().Level.Game) != None && CoopGame(GetPlayerOwner().Level.Game).Lobby != None)
+			CoopGame(GetPlayerOwner().Level.Game).Lobby.SetMaxPlayers(Options[i].Current + 2);
+
+		ShowMaxPlayers();
+		return;
+	}
+
+	// A save stands for its level (CoopLobby.SetLevel takes the slot's text), NEW GAME for the level row
+	if(i == OPTION_SAVE && SelectedSave() != 0)
 		Me().ServerCoopLobbyLevel(Options[i].Items[Options[i].Current]);
+	else if(i == OPTION_SAVE || i == OPTION_LEVEL)
+		Me().ServerCoopLobbyLevel(Options[OPTION_LEVEL].Items[Options[OPTION_LEVEL].Current]);
 	else
 		Me().ServerCoopLobbyChoose(Options[i].Current);
 
@@ -190,21 +209,8 @@ simulated function ApplyState()
 	if(i == -1)
 		return;
 
-	// The level, for the clients
-	if(!bIsHost)
-	{
-		Options[OPTION_LEVEL].Items.Length = 1;
-		Options[OPTION_LEVEL].Items[0] = Left(StateText, i);
-		Options[OPTION_LEVEL].Current = 0;
-	}
-	else
-	{
-		for(Line = 0; Line < Options[OPTION_LEVEL].Items.Length; ++Line)
-		{
-			if(Options[OPTION_LEVEL].Items[Line] ~= Left(StateText, i))
-				Options[OPTION_LEVEL].Current = Line;
-		}
-	}
+	ShowLevelState(Left(StateText, i));
+	ShowMaxPlayers();
 
 	StateText = Mid(StateText, i + 1);
 
@@ -237,6 +243,56 @@ simulated function ApplyState()
 	}
 }
 
+/*
+ * The lobby's level is a level or a save's name, "SAVE GEO_01B 11.11:20:26" (CoopSaveSlots.Describe): the save row shows the slot,
+ * the level row its map. Clients only show them, the host's rows follow what the server took.
+ */
+simulated function ShowLevelState(string LevelText)
+{
+	local string Map;
+	local int Line;
+
+	Map = class'CoopSaveSlots'.static.MapOfItem(LevelText);
+
+	if(Map == "")
+		Map = LevelText;
+
+	if(!bIsHost)
+	{
+		Options[OPTION_LEVEL].Items.Length = 1;
+		Options[OPTION_LEVEL].Items[0] = Map;
+		Options[OPTION_LEVEL].Current = 0;
+		Options[OPTION_SAVE].Items.Length = 1;
+		Options[OPTION_SAVE].Current = 0;
+
+		if(Map != LevelText)
+			Options[OPTION_SAVE].Items[0] = LevelText;
+		else
+			Options[OPTION_SAVE].Items[0] = "NEW GAME";
+
+		return;
+	}
+
+	Options[OPTION_LEVEL].Current = LevelItem(Map);
+	Options[OPTION_SAVE].Current = 0;
+
+	for(Line = 0; Line < Options[OPTION_SAVE].Items.Length; ++Line)
+	{
+		if(Map != LevelText && Options[OPTION_SAVE].Items[Line] == LevelText)
+			Options[OPTION_SAVE].Current = Line;
+	}
+
+	OptionLeftArrows[OPTION_LEVEL].bHidden = int(Map != LevelText);
+	OptionRightArrows[OPTION_LEVEL].bHidden = int(Map != LevelText);
+}
+
+// The host's player limit as the lobby has it (a save sets it, the limit can't go below the players present)
+simulated function ShowMaxPlayers()
+{
+	if(bIsHost && GetPlayerOwner().Level.Game != None)
+		Options[OPTION_PLAYERS].Current = Clamp(GetPlayerOwner().Level.Game.MaxPlayers - 2, 0, 2);
+}
+
 simulated function string MemberText(int Member)
 {
 	if(Member >= 9)
@@ -253,13 +309,13 @@ defaultproperties
 	MemberNames(1)="62 SCORCH"
 	MemberNames(2)="40 FIXER"
 	MemberNames(3)="07 SEV"
-	PlayerLines(0)=(MenuFont=Font'OrbitFonts.OrbitBold15',DrawPivot=DP_MiddleLeft,PosX=0.15,PosY=0.55,ScaleX=0.8,ScaleY=0.8)
-	PlayerLines(1)=(PosY=0.60)
-	PlayerLines(2)=(PosY=0.65)
-	PlayerLines(3)=(PosY=0.70)
-	AddressLines(0)=(MenuFont=Font'OrbitFonts.OrbitBold15',DrawColor=(B=120,G=220,R=255,A=255),DrawPivot=DP_MiddleLeft,PosX=0.15,PosY=0.74,ScaleX=0.6,ScaleY=0.6)
-	AddressLines(1)=(PosY=0.775)
-	AddressLines(2)=(PosY=0.81)
+	PlayerLines(0)=(MenuFont=Font'OrbitFonts.OrbitBold15',DrawPivot=DP_MiddleLeft,PosX=0.15,PosY=0.59,ScaleX=0.8,ScaleY=0.8)
+	PlayerLines(1)=(PosY=0.635)
+	PlayerLines(2)=(PosY=0.68)
+	PlayerLines(3)=(PosY=0.725)
+	AddressLines(0)=(MenuFont=Font'OrbitFonts.OrbitBold15',DrawColor=(B=120,G=220,R=255,A=255),DrawPivot=DP_MiddleLeft,PosX=0.15,PosY=0.775,ScaleX=0.6,ScaleY=0.6)
+	AddressLines(1)=(PosY=0.805)
+	AddressLines(2)=(PosY=0.835)
 	HelpText=(Text="")
 	AButton=(Blurred=(Text="READY"),bHidden=0)
 }

@@ -3,7 +3,7 @@
 [Русская версия](README.ru.md)
 
 This mod lets you play the Star Wars: Republic Commando campaign together with friends (up to 4 players).
-One player is the **host**: they play and run the server at the same time. The others connect to them by IP address.
+One player is the **host**: they play and run the server at the same time. The others connect to them through Steam or by IP address.
 The host plays 38 (Boss) and commands the squad; as the campaign goes on, the other players take over the Delta squad members
 (62 Scorch, 40 Fixer, 07 Sev).
 
@@ -20,7 +20,7 @@ The mod is built on [SWRC-Modding/CT](https://github.com/SWRC-Modding/CT), the c
   with the patch. Every player needs the same version of the game.
 - **Windows 10 or 11** (32 or 64 bit). Nothing else has to be installed: no Visual C++ runtime, no .NET. Linux/Steam Deck with
   Proton isn't tested.
-- **The same co-op archive for every player.** The version is shown in the menu title (`MOD 0.73`) and at the start of the log.
+- **The same co-op archive for every player.** The version is shown in the menu title (`MOD 0.8`) and at the start of the log.
 - **A connection between the host and the clients:** the same local network, or the same VPN network (ZeroTier, Radmin VPN,
   Hamachi), or ports **7777 and 11138 (TCP and UDP)** forwarded on the host's router. The host allows `CT.exe` in the Windows firewall (the mod asks
   for it on the first start).
@@ -51,7 +51,7 @@ If friends can't join you by IP, allow the game in the Windows firewall. Joining
 ## How to play
 
 ### Host
-- `MULTIPLAYER` → `CO-OP: HOST CAMPAIGN` → choose the level and the number of players → `START`.
+- `MULTIPLAYER` → `CO-OP: HOST CAMPAIGN` → `CREATE LOBBY`. See [Lobby](#lobby).
 
 ### Client
 - `MULTIPLAYER` → `CO-OP: JOIN BY IP` → enter the host's IP address → `CONNECT`.
@@ -83,7 +83,7 @@ then fails and the game closes with "CreateDevice failed (D3DERR_DEVICELOST)".
   the closest client without a squad member gets them: the camera flies to the squad member, the client watches the scene
   through that member's eyes (controls are locked), and takes control once it ends. The host remembers who plays whom (by IP
   address and name), so on the following levels each client starts as their squad member right away. Clients without a squad
-  member play extra commandos in colored armor.
+  member play extra commandos in white armor.
 - **The host commands the squad.** Orders that have to be carried out by a squad member played by a client (demolition — 62,
   hacking — 40) can't be given by the host: the client does it themselves ("Use" on the marker). If a client plays Sev (07),
   they get the hint "Take the sniper position" when the sniper marker appears and have to go to the sniper crate.
@@ -165,7 +165,7 @@ files differ. If you installed SWRC Fix before, just extract the co-op archive o
 
 ## Playing through Steam (no port forwarding, no VPN)
 
-Everything happens inside the game, start it the usual way. Everybody needs Steam running and **Republic Commando on their Steam account**; the entry below doesn't appear otherwise. An earlier build was played between two PCs; the current helper program has been tested on one PC so far.
+Everything happens inside the game, start it the usual way. Everybody needs Steam running and **Republic Commando on their Steam account**; the entry below doesn't appear otherwise. Geonosis has been played from start to finish this way, a host and one client on two PCs. Three or four players have only been tested on one PC.
 
 1. **Host:** `CO-OP: HOST CAMPAIGN`, create the lobby. A small helper program (`CoopTunnel`) starts by itself and ends with the game.
 2. **Friends:** `MULTIPLAYER > CO-OP: STEAM FRIENDS` shows the friends who are hosting, pick one. You must be Steam friends and the host must not be Invisible.
@@ -176,7 +176,7 @@ The lobby shows the host's addresses on screen. `LAN / VPN IP` works as it is on
 
 ## Sending logs
 
-After playing, close the game and run `Collect-Logs.bat` in `GameData`. It packs the logs of the game and the tunnel into `CoopLogs-<date>.zip` and shows the file; the names of the computer and the user and Steam IDs are masked.
+After playing, close the game and run `Collect-Logs.bat` in `GameData`. It packs the logs of the game and the tunnel into `CoopLogs-<date>.zip` and shows the file; the names of the computer and the user, Steam IDs and IP addresses are masked.
 
 ## Helping with tests
 
@@ -189,7 +189,7 @@ game, so copy it right after playing). Please send with a report:
   from the host and from the client at the same place).
 
 The first lines of the log contain what's needed to tell problems of the computer from problems of the mod: the mod's version
-(`ModCoop version 0.73`), Windows, processor, memory, graphics card, the resolution of the desktop, the game's exe and the
+(`ModCoop version 0.8`), Windows, processor, memory, graphics card, the resolution of the desktop, the game's exe and the
 wrappers next to it (`ModCoop: System: ...`). There is no personal data in it besides the names of the computer and of the
 Windows user, which the engine itself writes (`Init: Computer`, `Init: User`); remove them if you like.
 
@@ -198,7 +198,7 @@ Windows user, which the engine itself writes (`Init: Computer`, `Init: User`); r
 | Problem | Solution |
 |---|---|
 | The client can't connect: `NO ANSWER FROM THE HOST` or an empty checkered room | The host doesn't answer. Check in this order: **1)** the host has started the server (their `CT.log` contains the line `TcpNetDriver on port 7777`); **2)** the firewall was allowed on the host PC at the first start (if you answered "No", delete `GameData\Save\ModCoopFirewall.done` and start the game again); **3)** you connect to the host's IP address **in ZeroTier** (shown in the host's ZeroTier client under "Managed IPs"), not to their home IP address; **4)** both PCs are in the same ZeroTier network and marked `Auth` on my.zerotier.com; **5)** zapret, antivirus software or another VPN — turn them off for a moment and try again. The checkered room is a placeholder map the game shows while it waits for the connection; your textures are fine. |
-| The host's log shows `Login request`/`Login from ...`, but the client is dropped right away (the client's log shows `Welcomed by server`, then `Close`) | **You have different versions of the mod.** Every build of the mod is unique, and the engine silently drops the connection if the files don't match. Both players must extract **the same archive** (the version is shown in the menu title, e.g. `CO-OP CAMPAIGN: JOIN (MOD 0.73)`, and at the start of the log: `ModCoop version 0.73`). The host writes `ModCoop version mismatch` with both versions to its log. Versions before 0.4 were called 1.x (release 0.3 shows `MOD 1.3` in the menu). |
+| The host's log shows `Login request`/`Login from ...`, but the client is dropped right away (the client's log shows `Welcomed by server`, then `Close`) | **You have different versions of the mod.** Every build of the mod is unique, and the engine silently drops the connection if the files don't match. Both players must extract **the same archive** (the version is shown in the menu title, e.g. `CO-OP CAMPAIGN: JOIN (MOD 0.8)`, and at the start of the log: `ModCoop version 0.8`). The host writes `ModCoop version mismatch` with both versions to its log. Versions before 0.4 were called 1.x (release 0.3 shows `MOD 1.3` in the menu). |
 | zapret (zapret-discord-youtube) | By itself it doesn't affect ZeroTier addresses `10.x.x.x`, `172.16–31.x.x` or the local network: they are in its `ipset-exclude.txt`. But with **Game Filter** enabled it intercepts all UDP ports 1024–65535, so for Radmin (`26.x.x.x`), Hamachi (`25.x.x.x`) or if you changed the lists, turn Game Filter off (service.bat → option 4) or add the host's address to `lists\ipset-exclude-user.txt`. |
 | Connected, but dropped right away with "SERVER CONTENT ... IS NOT PRESENT" | The client has a different version of the mod or no mod at all. Install the same archive as the host. |
 | "YOUR CD KEY IS INVALID OR IN USE" | Since 0.57 the host doesn't check the CD keys of clients. If you see this message, the host has an old version of the mod. |

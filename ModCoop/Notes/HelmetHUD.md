@@ -119,3 +119,20 @@ SecurePosition 1,5; Hold 1,2; EngageTarget 2,7; бакта/оживление 1,
 3. Сравнить скриншоты с родными иконками хоста на 800x600, 1280x720, 1600x900 и в 4 окнах (`CoopTest.bat`) —
    заодно проверить «сползание» из теста в 4 окнах (по коду шлема ему неоткуда взяться, если окно 4:3).
 Сборку делать только когда игра на этом ПК закрыта.
+
+## Visor HUD in coop (2026-11-11)
+
+The visor (single player HUD) depends on bVisor (option), no split screen and NetMode == 0. NetMode is read in four places (scan of all of
+Engine.dll for byte reads and compares of `[reg+0x440]`):
+
+| RVA | Function | Instruction | Patched to |
+|---|---|---|---|
+| 0x12D9D3 | UHelmet::DrawStanceText | `mov al,[edx+0x440]` | `xor al,al` |
+| 0x130D8E | UHelmet::DrawHUD (16 places use the flag: base 404/434, bars, frame) | `mov al,[ecx+0x440]` | `xor al,al` |
+| 0x136118 | UHelmet::DrawHelmet (the helmet around the view) | `mov al,[ecx+0x440]` | `xor al,al` |
+| 0x1B1824 | FPlayerSceneNode::Render (world into the working target) | `cmp [ecx+0x440],dl` | `cmp dl,dl` |
+
+Frame order in visor mode (FPlayerSceneNode::Render): "Draw HUD To WorkingTarget" (UHelmet::DrawHUD, call at 0x1B1EA1), "Draw Helmet To
+Back Buffer" (DrawHelmet bends the working target onto the visor), "Draw Additional UI" (interactions, then the script HUD's PostRender
+straight on the screen). The helmet draws through UCanvas+0x88 (FCanvasUtil); UViewport+0x60 is the canvas. CoopHUD's icons are drawn by
+`DrawVisorSquad` from the redirected call, base 404, no curved surface (the visor bends them).

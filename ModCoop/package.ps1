@@ -1,9 +1,16 @@
 ﻿# Builds the release archive of the coop mod.
 # The archive is meant to be extracted into the game's GameData directory.
 # Usage (after 'build.bat release' and 'ucc make'):  powershell -ExecutionPolicy Bypass -File ModCoop\package.ps1
-param([string]$Version = "1.3")
+param([string]$Version = "") # Empty: CoopConfig.MOD_VERSION
 
 $ErrorActionPreference = "Stop"
+
+if($Version -eq "")
+{
+	$Match = Select-String -Path (Join-Path $PSScriptRoot "Classes\CoopConfig.uc") -Pattern 'const MOD_VERSION = "([^"]+)"' | Select-Object -First 1
+	if(!$Match) { throw "MOD_VERSION not found in CoopConfig.uc" }
+	$Version = $Match.Matches[0].Groups[1].Value
+}
 
 $Code     = Split-Path -Parent $PSScriptRoot
 $GameData = Join-Path (Split-Path -Parent $Code) "GameData"

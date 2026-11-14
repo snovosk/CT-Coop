@@ -6,9 +6,14 @@ class CoopHUD extends CTHUD;
  * played by clients are not in the AI squad of the host (see CoopGame.DetachClientMembers), so their icons were missing. They are
  * drawn here exactly like UHelmet::DrawHUD in Engine.dll does it, the numbers come from its machine code (Notes/HelmetHUD.md):
  * frame, order icon in the color of the health level, number, direction arrow or timer ring, and the corners while the member talks.
- * Clients see every other Delta member (the host, 38, has no icon), the host sees the members played by clients.
+ * Clients see every other Delta member, the host sees the members played by clients.
+ * Clients also see the host (38): the helmet has no slot for the leader. His icon takes the slot of the client's own member, or slot 0,
+ * left of slot 1, for a client without one (HostSlot), with the same frame, health color, number, arrow and timer ring.
  */
 
+var bool bVisorSet;
+var string VisorResult;   // What CoopNative.SetVisorHUD did: with "call on" the icons are drawn in the visor (DrawVisorSquad)
+var bool bVisorLayout;    // The icons being drawn now are in the visor      // This HUD switched on the helmet's single player HUD (PostRender)
 var Texture SquadIcons;  // HUDTextures.Icons.CloneVisorIcons, the helmet's CloneVisorIcons
 var Texture EventTimer;
 var Texture NumberFont;  // OrbitFonts.OrbitBold15_PageA, the page of the helmet's Orbit15Font (see DrawNumber)
@@ -18,17 +23,50 @@ var int DigitStarts[10], DigitWidths[10];  // HUDTextures.Reticles.HUD_EventTime
 var byte RingCells[16];
 var byte RingSteps[16];  // The step (1-12) from which the cell is filled
 
+// The single player HUD of the helmet for every player of a coop game (CoopNative.SetVisorHUD), off again with this HUD. Only the HUD
+// that draws the screen switches it: the host has more than one CoopHUD (log of 2026-11-11)
+simulated event Destroyed()
+{
+	if(bVisorSet)
+		Log("ModCoop: visor HUD" $ class'CoopNative'.static.SetVisorHUD(false));
+
+	Super.Destroyed();
+}
+
 simulated function PostRender(Canvas C)
 {
 	class'CoopNative'.static.SetDebugStep("HUD PostRender");
+
+	if(!bVisorSet)
+	{
+		bVisorSet = true;
+		VisorResult = class'CoopNative'.static.SetVisorHUD(true, self);
+		Log("ModCoop: visor HUD" $ VisorResult);
+	}
+
 	Super.PostRender(C);
 
-	if(!bHideHUD && PlayerOwner != None && PlayerOwner.Pawn != None && (PlayerOwner.Helmet == None || PlayerOwner.Helmet.bDraw) &&
-	   !PlayerOwner.bBehindView)
-		DrawCoopSquad(C);
+	// In the visor the icons are drawn with the helmet's own (DrawVisorSquad), here only without it
+	if(InStr(VisorResult, "call on") == -1 && CanDrawSquad())
+		DrawCoopSquad(C, false);
 }
 
-simulated function DrawCoopSquad(Canvas C)
+simulated function bool CanDrawSquad()
+{
+	return !bHideHUD && PlayerOwner != None && PlayerOwner.Pawn != None && (PlayerOwner.Helmet == None || PlayerOwner.Helmet.bDraw) && !PlayerOwner.bBehindView;
+}
+
+/*
+ * Called by ModCoop.dll right after the helmet drew its HUD into the visor's working target (CoopNative.SetVisorHUD): the icons are drawn
+ * there too, so the visor bends them and moves them with the head like the helmet's own.
+ */
+simulated event DrawVisorSquad(Canvas C)
+{
+	if(CanDrawSquad())
+		DrawCoopSquad(C, true);
+}
+
+simulated function DrawCoopSquad(Canvas C, bool bVisor)
 {
 	local Pawn P;
 	local int Slot;
@@ -38,7 +76,9 @@ simulated function DrawCoopSquad(Canvas C)
 	bTestOverlay = Level.NetMode != NM_Client && CoopGame(Level.Game) != None && CoopGame(Level.Game).TestAction ~= "squadicons";
 
 	// In network games the helmet bends its HUD like the visor (FCanvasUtil curved surface), the same is used here
-	bOldCurved = C.SetCurvedSurface(true);
+	// Without the visor the helmet bends its HUD itself (FCanvasUtil curved surface), in the visor the visor does
+	bVisorLayout = bVisor;
+	bOldCurved = C.SetCurvedSurface(!bVisor);
 
 	foreach DynamicActors(class'Pawn', P)
 	{
@@ -47,10 +87,12 @@ simulated function DrawCoopSquad(Canvas C)
 
 		if(P.IsA('Commando07Delta') || P.IsA('Commando40Delta') || P.IsA('Commando62Delta'))
 			Slot = P.SquadHUDSlot;
+		else if(IsHostPawn(P))
+			Slot = HostSlot();
 		else
 			continue;
 
-		if(Slot < 1 || Slot > 3)
+		if(Slot < 0 || Slot > 3)
 			continue;
 
 		// The host's helmet already shows the AI members; clients only show members that joined the squad (not e.g. Scorch on GEO_01A
@@ -58,7 +100,7 @@ simulated function DrawCoopSquad(Canvas C)
 		if(Level.NetMode != NM_Client && PlayerController(P.Controller) == None && !bTestOverlay)
 			continue;
 
-		if(Level.NetMode == NM_Client && (CoopPlayer(PlayerOwner) == None || !CoopPlayer(PlayerOwner).IsSquadIconMember(P)))
+		if(Level.NetMode == NM_Client && !IsHostPawn(P) && (CoopPlayer(PlayerOwner) == None || !CoopPlayer(PlayerOwner).IsSquadIconMember(P)))
 			continue;
 
 		DrawSquadIcon(C, P, Slot, bTestOverlay && PlayerController(P.Controller) == None);
@@ -66,6 +108,32 @@ simulated function DrawCoopSquad(Canvas C)
 
 	C.Flush();
 	C.SetCurvedSurface(bOldCurved);
+}
+
+/*
+ * Where the host's icon goes on a client. A client playing a squad member has no icon of its own in its slot: the host takes it, and the
+ * row is the three icons of single player (compared with GEO_03C, single player with the whole squad, 2026-11-11). Left of slot 1 (slot 0,
+ * x = 35) only for a client without a member: there the curved surface also put it a little lower.
+ */
+simulated function int HostSlot()
+{
+	local Pawn Own;
+
+	Own = PlayerOwner.Pawn;
+
+	if(Own != None && (Own.IsA('Commando07Delta') || Own.IsA('Commando40Delta') || Own.IsA('Commando62Delta')) && Own.SquadHUDSlot >= 1 && Own.SquadHUDSlot <= 3)
+		return Own.SquadHUDSlot;
+
+	return 0;
+}
+
+/*
+ * The host's pawn as a client sees it: the single player commando (clients play CoopCommando or a Delta member), with a player.
+ * Only clients draw it, the host has his own helmet.
+ */
+simulated function bool IsHostPawn(Pawn P)
+{
+	return Level.NetMode == NM_Client && PlayerCommando(P) != None && CoopCommando(P) == None && P.PlayerReplicationInfo != None;
 }
 
 /*
@@ -82,7 +150,11 @@ simulated function DrawSquadIcon(Canvas C, Pawn P, int Slot, bool bTint)
 	SX = C.ClipX / 800.0;
 	SY = C.ClipY / 600.0;
 	X = 40 * (Slot - 1);
+	// The helmet's base: 404 in the visor, 434 without (Notes/HelmetHUD.md)
 	Base = 434;
+
+	if(bVisorLayout)
+		Base = 404;
 	T = Level.TimeSeconds;
 	Pulse = 55 + 200 * Sin(5 * T);
 
@@ -90,6 +162,13 @@ simulated function DrawSquadIcon(Canvas C, Pawn P, int Slot, bool bTint)
 		CoopPlayer(PlayerOwner).GetSquadIconState(P, IconX, IconY, MarkerState);
 	else
 		CoopGame(Level.Game).GetSquadIconState(P, IconX, IconY, MarkerState);
+
+	// The host gives orders, he has none: "form up" like the members played by clients
+	if(IsHostPawn(P))
+	{
+		IconX = 1;
+		IconY = 4;
+	}
 
 	bTarget = PlayerOwner.Target == P;
 	C.Style = ERenderStyle.STY_Alpha;
@@ -140,7 +219,10 @@ simulated function DrawSquadIcon(Canvas C, Pawn P, int Slot, bool bTint)
 	else
 		SetIconColor(C, 164, 200, 208, 200, bTint);
 
-	DrawNumber(C, P.GetHudDescription(), int((81 + X) * SX), int((Base - 16) * SY), SX, SY);
+	if(IsHostPawn(P))
+		DrawNumber(C, "38", int((81 + X) * SX), int((Base - 16) * SY), SX, SY);
+	else
+		DrawNumber(C, P.GetHudDescription(), int((81 + X) * SX), int((Base - 16) * SY), SX, SY);
 
 	if(MarkerState >= 2)
 		DrawTimerRing(C, 97 + X, Base + 31, SX, SY, (MarkerState - 2) / 12.0, bTint);

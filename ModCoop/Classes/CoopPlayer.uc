@@ -37,6 +37,7 @@ var rotator     TakeoverFromRotation;
 var float       TakeoverStartTime;
 var float       TakeoverArc;          // Height of the flight's arc; none from the scene camera into the eyes
 var bool        bCoopHUDHidden, bWasHUDHidden, bWasHelmetDrawn; // See SetCoopHUDHidden
+var Pawn        VisionModePawn;       // Local player: the pawn put in its default vision mode (CheckVisionMode)
 var Pawn        WatchedMember;
 var Pawn        WatchHiddenPawn;      // Client only: watched squad member hidden while its scene is seen through its eyes (see PlayerCalcView)
 var array<Actor> WatchHiddenActors;
@@ -44,6 +45,9 @@ var vector      WatchCameraLocation;
 var rotator     WatchCameraRotation;
 var float       WatchCameraTime;
 var array<Pawn> SnipeKeptOff;         // See KeepOthersFromSnipe
+var float NextNameColorCheck;          // See CheckNameColors
+var bool  bNoAccessoryFix;             // Test only: CheckAccessoryOwners off ("AccessoryFix 0")
+var Actor TurretHidden;               // Client: hidden for its own view while on the turret (the walker, see ClientCoopManTurret)
 var bool        bWatchFocus;          // Client only: the scene camera looks at WatchFocus (a door breach)
 var vector      WatchFocus;
 var Pawn        WatchCameraPawn;      // Client only: squad member whose scene the camera shows (see CalcWatchView)
@@ -111,6 +115,11 @@ var float       NextJumpLog;
 var vector      JumpCamera;
 var float       JumpCameraMax;
 var Weapon      ServerHands;               // See ParkServerHands
+var MarkerIconActor WatchIcon;              // Test only: see the client command WatchIcon
+var bool        bIconWatchHidden;
+var float       WatchAlpha;
+var bool        bSwitchWeaponCall;         // A weapon key (SwitchWeapon) is being handled, see ForceWeaponSwitch
+var Weapon      LastHeldWeapon;            // Client: the rifle or pistol held before the hands, see FixHandSignalWeapon
 var CoopAnimController AnimController;     // Client: see ClientCoopScriptAnim
 var int         LastCommandoCount;          // Client: see LogCommandos
 var bool        bLiftView;                  // Riding a lift: the camera over the shoulder looks at the center of the car (ClientCoopLiftView)
@@ -137,15 +146,33 @@ var bool        bHideRidersSent;            // Server: ClientCoopHideRiders(true
 var bool        bWatchHidden;               // Server: own commando hidden while watching a member (see CoopGame.HideWatchingPawns)
 var array<Actor> OwnHiddenActors;          // Server: see bWatchHidden
 var bool        bLiftFaced;                 // Server: turned to the middle of the lift (CoopGame.FaceLiftCenter)
+var bool        bSpaceWalk, bSpaceWalkDone; // Client: see ClientCoopSpaceWalkPos
+var vector      SpaceWalkTarget;
+var float       NextSpaceWalkLog;
+var array<SquadMarker> ShownMarkers;        // Client: see ClientCoopSetMarkerShown
+var array<byte> ShownMarkerValues;          // 0 hidden, 1 shown, 2 not known yet
+var array<byte> ShownMarkerLogged;
+var array<byte> ShownMarkerDisabled; // 1: ClientCoopSetMarkerShown put the client's copy into Disabled
+var array<Actor> AmbientActors;      // See CheckAmbientSounds
+var array<Sound> AmbientSounds;
+var float NextAmbientCheck;
+var array<SquadMarker> SentMarkers;         // Server: see CoopGame.SyncMarkerVisibility
+var array<byte> SentMarkerFlags;
+var bool bTrackerOverride;                  // Server: the client's tracker shows a pointer of the mod (see CoopGame.SetTrackerOverride)
+var bool bSentTrackerShow;                  // Server: what the client's tracker shows, see CoopGame.SyncObjectiveTracker
+var Actor SentTrackerActor;
+var vector SentTrackerLocation;
+const SPACE_WALK_SNAP_DISTANCE = 300.0;     // Further from the server's position than interpolation should cover
+const SPACE_WALK_FOLLOW_RATE = 8.0;         // Share of the distance to the target covered per second
 
 replication
 {
 	reliable if(Role == ROLE_Authority)
 		ClientCoopMessage, ClientCoopPawnRevived, ClientCoopSetIncapacitated, ClientCoopSetIdleState, ClientCoopSetPanelState, ClientCoopTakeoverCamera, ClientCoopSetActorCollision;
 	reliable if(Role == ROLE_Authority)
-		ClientCoopDumpProps, ClientCoopObjectiveTracker, ClientCoopBlinkHUD, ClientCoopShakeView, ClientCoopScreenFade, ClientCoopCriticalMessage, ClientCoopSetObjectives, ClientCoopTestLag, ClientCoopTestCommand, ClientCoopProbe, ClientCoopSetWatchFocus, ClientCoopSetCollisionByTag, ClientCoopSetHiddenByTag, ClientCoopSetMarkerState, ClientCoopManTurret, ClientCoopLeaveTurret, ClientCoopScriptAnim, ClientCoopEndScriptAnim, ClientCoopLiftView, ClientCoopHideRiders, ClientCoopWeaponsQuiet, ClientCoopHostWaitAnim, ClientCoopEndHostWaitAnim, ClientCoopRunAction, ClientCoopTriggerActor, ClientCoopTriggerLocal, ClientCoopTriggerMaterial;
+		ClientCoopDumpProps, ClientCoopObjectiveTracker, ClientCoopBlinkHUD, ClientCoopShakeView, ClientCoopScreenFade, ClientCoopCriticalMessage, ClientCoopSetObjectives, ClientCoopTestLag, ClientCoopTestCommand, ClientCoopProbe, ClientCoopSetWatchFocus, ClientCoopSetCollisionByTag, ClientCoopSetHiddenByTag, ClientCoopSetMarkerState, ClientCoopManTurret, ClientCoopLeaveTurret, ClientCoopScriptAnim, ClientCoopEndScriptAnim, ClientCoopLiftView, ClientCoopHideRiders, ClientCoopWeaponsQuiet, ClientCoopHostWaitAnim, ClientCoopEndHostWaitAnim, ClientCoopRunAction, ClientCoopTriggerActor, ClientCoopTriggerLocal, ClientCoopTriggerMaterial, ClientCoopEndSpaceWalk, ClientCoopSetMarkerShown, ClientCoopPrepareTravel, ClientCoopMoverStop;
 	unreliable if(Role == ROLE_Authority)
-		ClientCoopSetSquadState, ClientCoopSpawnEffect, ClientCoopSetPanelProgress, ClientCoopSetLight, ClientCoopKeepScriptAnim, ClientCoopCheckCommandos;
+		ClientCoopSetSquadState, ClientCoopSpawnEffect, ClientCoopSetPanelProgress, ClientCoopSetLight, ClientCoopKeepScriptAnim, ClientCoopCheckCommandos, ClientCoopSpaceWalkPos;
 	reliable if(Role == ROLE_Authority)
 		ClientCoopSetActorDisplay, ClientCoopSetActorLook, ClientCoopSetPanelLinks, ClientCoopSetMarkerLink, ClientCoopLobbyState, ClientCoopKeepName;
 	reliable if(Role < ROLE_Authority)
@@ -171,7 +198,72 @@ simulated event PostNetBeginPlay()
 	else
 		class'CoopConfig'.default.ReconnectAttempts = 0;
 
-	Log("ModCoop: Joined coop host " $ ServerAddress);
+	Log("ModCoop: Joined coop host " $ ServerAddress $ ", level package " $ class'CoopNative'.static.LevelPackageText(self));
+}
+
+/*
+ * Client, reliable, sent just before ClientTravel. The host refuses connections until it has loaded the level, which took 16 s from the client's
+ * Browse in the logs of 2026-11-09, and a client giving up after ClientTimeout (15 s) went through the failure menu and a reconnect.
+ * BeginSession restores the short timeout when the client has joined.
+ */
+simulated function ClientCoopPrepareTravel(string MapName)
+{
+	local string MenuClass, Pic, Title, Text;
+	local int Hints;
+	local MenuTemplate M;
+
+	if(Level.NetMode != NM_Client)
+		return;
+
+	class'CoopConfig'.static.ApplyTravelTimeouts();
+	Log("ModCoop: level change, waiting for the host up to " $ class'CoopConfig'.default.TravelConnectTimeout $ " s");
+
+	// The host sees the engine's loading screen, the client saw its old level stand still until the host was ready (the user, 2026-11-11).
+	// The same screen until the next level replaces this one
+	// The engine fills the host's screen from LevelLoadingInfo.int by map name (GameEngine.InitLevelLoadingInfo): the menu class, the
+	// title, a picture and text at the start of a chapter. The client's screen had no title (the user, 2026-11-14). Same table here
+	MenuClass = GetLoadingMenuClass();
+	FindLoadingInfo(MapName, MenuClass, Pic, Title, Text, Hints);
+	ClientOpenMenu(MenuClass);
+
+	foreach AllActors(class'MenuTemplate', M)
+	{
+		if(CTInfoBase(M) != None)
+			CTInfoBase(M).SetInfoOptions(Pic, Title, Text, MapName, Hints != 0);
+		else if(CTLoading(M) != None)
+			CTLoading(M).SetInfoOptions(Pic, Title, Text, MapName, Hints != 0);
+	}
+
+	Log("ModCoop: loading screen " $ MenuClass $ " for " $ MapName $ ": '" $ Title $ "'");
+}
+
+// The entry of LevelLoadingInfo.int for a map, read the same way as GameEngine.InitLevelLoadingInfo
+simulated function FindLoadingInfo(string MapName, out string MenuClass, out string Pic, out string Title, out string Text, out int Hints)
+{
+	local int i;
+	local string Value;
+
+	for(i = 0; i < 200; ++i)
+	{
+		Value = Localize("LevelLoadingInfo", "MapName[" $ i $ "]", "LevelLoadingInfo", true);
+
+		if(Value == "")
+			continue;
+
+		if(!(Value ~= MapName))
+			continue;
+
+		Value = Localize("LevelLoadingInfo", "LoadingMenuClass[" $ i $ "]", "LevelLoadingInfo", true);
+
+		if(Value != "")
+			MenuClass = Value;
+
+		Pic = Localize("LevelLoadingInfo", "LoadingPic[" $ i $ "]", "LevelLoadingInfo", true);
+		Title = Localize("LevelLoadingInfo", "LoadingTitle[" $ i $ "]", "LevelLoadingInfo", true);
+		Text = Localize("LevelLoadingInfo", "LoadingText[" $ i $ "]", "LevelLoadingInfo", true);
+		Hints = int(Localize("LevelLoadingInfo", "LoadingShowHints[" $ i $ "]", "LevelLoadingInfo", true));
+		return;
+	}
 }
 
 // See CoopConfig.NetClientRate. The server limits it to its own setting. Not saved to the config.
@@ -233,6 +325,7 @@ simulated function ClientCoopSetMarkerLink(int Index, Actor A, SquadMarker Marke
 		A.NavPts[1] = Nav1;
 
 	Log("ModCoop: " $ A $ " (" $ A.Class.Name $ ") belongs to the marker " $ Marker $ ", places " $ A.NavPts.Length);
+	KeepTurretOnBase(Turret(A));
 }
 
 simulated function ClientCoopSetPanelLinks(int Index, ActivateItem Item, SquadMarker Marker, NavigationPoint Nav0, NavigationPoint Nav1, bool bUsableByPlayer)
@@ -432,6 +525,287 @@ simulated function ClientCoopEndScriptAnim(Pawn P)
 
 	P.Controller = None;
 	P.ChangeAnimation();
+}
+
+// Test only
+static function string TurretCollision(Turret T)
+{
+	return T $ " (" $ T.Class.Name $ ") Collide=" $ T.bCollideActors $ " Zero=" $ T.bBlockZeroExtentTraces $ " NonZero=" $ T.bBlockNonZeroExtentTraces $ " ProjTarget=" $ T.bProjTarget $ " Hidden=" $ T.bHidden $ " PlayerUsable=" $ T.bPlayerUsable $ " Base=" $ T.Base $ " Loc=" $ T.Location;
+}
+
+// Client: where a mover moved by a level script stops, see CoopGame.SendMoverStops. M is None if the actor isn't here yet.
+simulated function ClientCoopMoverStop(Mover M, int Key)
+{
+	local Turret T;
+
+	if(Level.NetMode != NM_Client || M == None || M.ScriptTriggeredKeyframe == Key)
+		return;
+
+	Log("ModCoop: " $ M $ " (" $ M.Tag $ ") stops at key " $ Key $ " like on the server, it is at key " $ M.KeyNum $ " moving " $ M.bInterpolating);
+	M.ScriptTriggeredKeyframe = Key;
+
+	foreach DynamicActors(class'Turret', T)
+	{
+		if(T.Base == M)
+			KeepTurretOnBase(T);
+	}
+}
+
+/*
+ * Client: a turret that rides a mover (RAS_04C, the walker's cannon on BigLift, AttachTag). Turret has bMovable=False by default, the map
+ * sets it for this one, and a client's copy is made from the class defaults (bMovable isn't replicated): the base couldn't carry it and
+ * SetLocation failed. It stayed at the bottom of the lift shaft while the lift brought the walker up, 4500 units from where the server
+ * has it, and the client could never aim at it (test walker). Its Physics also differs (PHYS_Flying on the client, none on the server).
+ * Movable and put back on its base, like on the server.
+ */
+simulated function KeepTurretOnBase(Turret T)
+{
+	local Actor B;
+	local bool bMoved;
+
+	// Only on movers: the gunship's ball turrets ride their gunship and weren't part of this (test turret on GEO_04A)
+	if(T == None || T.Role == ROLE_Authority || Mover(T.Base) == None || (T.bMovable && T.Physics == PHYS_None))
+		return;
+
+	B = T.Base;
+	T.bMovable = true;
+	T.SetPhysics(PHYS_None);
+	bMoved = T.SetLocation(B.Location + (T.RelativeLocation >> B.Rotation));
+	T.SetBase(B);
+	Log("ModCoop: " $ T $ " (" $ T.Class.Name $ ") put back on " $ B $ ": moved " $ bMoved $ " to " $ T.Location);
+}
+
+/*
+ * Client: the marker of an item that the server lets this client see. The item's SquadMarker is set by the marker on the server
+ * (SquadMarker.PostBeginPlay isn't simulated) and is None on a client; the marker's Anchor comes with the map.
+ */
+simulated function SquadMarker ShownMarkerOf(Actor Item)
+{
+	local int i;
+
+	for(i = 0; i < ShownMarkers.Length; ++i)
+	{
+		if(ShownMarkers[i] != None && ShownMarkers[i].Anchor == Item && ShownMarkerValues[i] == 1)
+			return ShownMarkers[i];
+	}
+
+	return None;
+}
+
+// Client: the server's decision for a marker (SyncMarkerVisibility), see CoopExtension.SquadMarkerShowIcons
+simulated function bool IsMarkerShown(SquadMarker M)
+{
+	local int i;
+
+	for(i = 0; i < ShownMarkers.Length; ++i)
+	{
+		if(ShownMarkers[i] == M)
+			return ShownMarkerValues[i] == 1;
+	}
+
+	return false;
+}
+
+// Test only: see WatchIcon
+simulated function WatchIconTick()
+{
+	if(WatchIcon.bHidden == bIconWatchHidden && Abs(WatchIcon.CurrentAlpha - WatchAlpha) < 0.05)
+		return;
+
+	Log("CoopTest: watch " $ WatchIcon $ " hidden " $ bIconWatchHidden $ " -> " $ WatchIcon.bHidden $ ", alpha " $ WatchAlpha $ " -> " $ WatchIcon.CurrentAlpha $ ", state " $ WatchIcon.GetStateName() $ " at " $ Level.TimeSeconds);
+	bIconWatchHidden = WatchIcon.bHidden;
+	WatchAlpha = WatchIcon.CurrentAlpha;
+}
+
+/*
+ * Client, see CoopGame.SyncMarkerVisibility (the server owns the state). M is None if the actor isn't here yet, the full resend covers it.
+ * The state of the marker is logged once so a test can tell whether bHidden really removes the icon.
+ */
+simulated function ClientCoopSetMarkerShown(SquadMarker M, bool bShown, optional Actor Anchor)
+{
+	local int i, Value;
+	local string Usability;
+
+	if(Level.NetMode != NM_Client || M == None)
+		return;
+
+	// Markers spawned while playing (the bacta dispenser's) get their item on the server only: the client's copy had none (ShownMarkerOf)
+	if(M.Anchor == None && Anchor != None)
+		M.Anchor = Anchor;
+
+	if(M == WatchIcon)
+		Log("CoopTest: watch: ClientCoopSetMarkerShown " $ bShown $ " at " $ Level.TimeSeconds);
+
+	M.bHidden = !bShown;
+
+	for(i = 0; i < ShownMarkers.Length; ++i)
+	{
+		if(ShownMarkers[i] == M)
+			break;
+	}
+
+	if(i == ShownMarkers.Length)
+	{
+		ShownMarkers.Length = i + 1;
+		ShownMarkers[i] = M;
+		ShownMarkerValues[i] = 2;
+		ShownMarkerLogged[i] = 0;
+		ShownMarkerDisabled[i] = 0;
+	}
+
+	// A hidden icon was still highlighted when looked at (user, 2026-11-10): the native targeting goes by the client's copy, which stays in
+	// its auto state Enabled. Disabled ignores NotifyTargeted. Only a state this function set is undone.
+	if(!bShown && M.IsInState('Enabled'))
+	{
+		M.GotoState('Disabled');
+		ShownMarkerDisabled[i] = 1;
+	}
+	else if(bShown && ShownMarkerDisabled[i] == 1)
+	{
+		ShownMarkerDisabled[i] = 0;
+
+		if(M.IsInState('Disabled'))
+			M.GotoState('Enabled');
+	}
+
+	if(bShown)
+		Value = 1;
+
+	if(ShownMarkerValues[i] != Value)
+	{
+		ShownMarkerValues[i] = Value;
+		Log("ModCoop: marker shown M=" $ M $ " shown=" $ bShown);
+	}
+
+	if(ShownMarkerLogged[i] != 0 || Pawn == None)
+		return;
+
+	ShownMarkerLogged[i] = 1;
+	Usability = "no anchor";
+
+	// Native code, a client's marker may not have its anchor yet
+	if(M.Anchor != None)
+		Usability = string(M.GetMarkerUsability(Pawn));
+
+	Log("ModCoop: marker look M=" $ M $ " state=" $ M.GetStateName() $ " bHidden=" $ M.bHidden $ " alpha=" $ M.GetPropertyText("CurrentAlpha") $ " usability=" $ Usability);
+}
+
+/*
+ * The server's CoopSpaceWalk carries a client's flyer along the host's flight on RAS_01A. Client, the server owns the position.
+ * Repeated by the server; the first one starts the state, nothing after the end can start it again. A lost update is replaced by the next one.
+ */
+simulated function ClientCoopSpaceWalkPos(vector Target)
+{
+	if(Level.NetMode != NM_Client || bSpaceWalkDone)
+		return;
+
+	SpaceWalkTarget = Target;
+
+	if(bSpaceWalk)
+		return;
+
+	bSpaceWalk = true;
+	Log("ModCoop: space walk starts, target " $ Target);
+
+	// Without a pawn CheckSpaceWalk starts it after ClientRestart
+	if(Pawn != None)
+		GotoState('CoopSpaceWalk');
+}
+
+// Client, reliable: the flight is over at Spot
+simulated function ClientCoopEndSpaceWalk(vector Spot)
+{
+	if(Level.NetMode != NM_Client)
+		return;
+
+	bSpaceWalk = false;
+	bSpaceWalkDone = true;
+	Log("ModCoop: space walk ends at " $ Spot);
+
+	if(Pawn != None)
+	{
+		Pawn.SetLocation(Spot);
+		Pawn.Velocity = vect(0,0,0);
+		Pawn.Acceleration = vect(0,0,0);
+		Pawn.SetPhysics(PHYS_Falling);
+	}
+
+	if(IsInState('CoopSpaceWalk'))
+		GotoState('PlayerWalking');
+}
+
+/*
+ * The sound journal (CoopNative.SetSoundLog) also gets the looping sounds actors carry (AmbientSound: movers while they move, machines): a
+ * stuck sound is often one of them that never went off on this side. Once a second, the player of this window only.
+ */
+simulated function CheckAmbientSounds()
+{
+	local Actor A;
+	local int i;
+	local bool bFound;
+
+	if(!class'CoopConfig'.default.bSoundLog || Viewport(Player) == None || Level.TimeSeconds < NextAmbientCheck)
+		return;
+
+	NextAmbientCheck = Level.TimeSeconds + 1.0;
+
+	for(i = AmbientActors.Length - 1; i >= 0; --i)
+	{
+		if(AmbientActors[i] == None || AmbientActors[i].bDeleteMe || AmbientActors[i].AmbientSound != AmbientSounds[i])
+		{
+			class'CoopNative'.static.LogSound("Ambient off " $ AmbientSounds[i] $ " of " $ AmbientActors[i]);
+			AmbientActors.Remove(i, 1);
+			AmbientSounds.Remove(i, 1);
+		}
+	}
+
+	foreach DynamicActors(class'Actor', A)
+	{
+		if(A.AmbientSound == None)
+			continue;
+
+		bFound = false;
+
+		for(i = 0; i < AmbientActors.Length && !bFound; ++i)
+			bFound = AmbientActors[i] == A;
+
+		if(bFound)
+			continue;
+
+		AmbientActors[AmbientActors.Length] = A;
+		AmbientSounds[AmbientSounds.Length] = A.AmbientSound;
+		class'CoopNative'.static.LogSound("Ambient on " $ A.AmbientSound $ " of " $ A $ " (" $ A.Class.Name $ ") at " $ A.Location);
+	}
+}
+
+// Client: ClientRestart (the possession of the flyer) sends the client to PlayerWalking, and the flight has to survive that
+simulated function CheckSpaceWalk()
+{
+	local string WeaponText, WeaponState;
+
+	if(!bSpaceWalk)
+		return;
+
+	if(Pawn != None && IsInState('PlayerWalking'))
+	{
+		Log("ModCoop: space walk: back from PlayerWalking");
+		GotoState('CoopSpaceWalk');
+	}
+
+	if(Pawn == None || Level.TimeSeconds < NextSpaceWalkLog)
+		return;
+
+	NextSpaceWalkLog = Level.TimeSeconds + 1.0;
+	WeaponText = "None";
+	WeaponState = "None";
+
+	if(Pawn.Weapon != None)
+	{
+		WeaponText = string(Pawn.Weapon);
+		WeaponState = string(Pawn.Weapon.GetStateName());
+	}
+
+	Log("ModCoop: space walk client: loc=" $ Pawn.Location $ " target=" $ SpaceWalkTarget $ " err=" $ int(VSize(SpaceWalkTarget - Pawn.Location)) $ " state=" $ GetStateName() $ " phys=" $ Pawn.Physics $ " weapon=" $ WeaponText $ " wstate=" $ WeaponState $ " yaw=" $ Rotation.Yaw);
 }
 
 // See CoopGame.ForwardMarkerState
@@ -766,13 +1140,26 @@ simulated function CheckBlocked()
 	Dir = Normal(Pawn.Acceleration * vect(1,1,0)) * (Pawn.CollisionRadius + 40);
 	HitKnee = Trace(HitLocation, HitNormal, Pawn.Location + Dir - vect(0,0,1) * Pawn.CollisionHeight * 0.5, Pawn.Location - vect(0,0,1) * Pawn.CollisionHeight * 0.5, true);
 	HitChest = Trace(HitLocation, HitNormal, Pawn.Location + Dir + vect(0,0,1) * Pawn.CollisionHeight * 0.5, Pawn.Location + vect(0,0,1) * Pawn.CollisionHeight * 0.5, true);
-	Log("ModCoop: Blocked at " $ Pawn.Location $ " moving " $ Normal(Pawn.Acceleration) $ " knee=" $ HitKnee $ " (" $ HitKnee.Class $ " " $ HitKnee.StaticMesh $ ") chest=" $ HitChest $ " (" $ HitChest.Class $ " " $ HitChest.StaticMesh $ ") level=" $ Level.Title);
+	// Nothing in the way of the traces is logged too (a pawn or a corner): no warnings for the None
+	Log("ModCoop: Blocked at " $ Pawn.Location $ " moving " $ Normal(Pawn.Acceleration) $ " knee=" $ BlockText(HitKnee) $ " chest=" $ BlockText(HitChest) $ " level=" $ Level.Title);
+}
+
+static function string BlockText(Actor A)
+{
+	if(A == None)
+		return "None";
+
+	return A $ " (" $ A.Class $ " " $ A.StaticMesh $ ")";
 }
 
 // Large corrections of the client's position by the server mean the server's pawn is stopped by something the client doesn't have
 function LongClientAdjustPosition(float TimeStamp, name newState, EPhysics newPhysics, float NewLocX, float NewLocY, float NewLocZ, float NewVelX, float NewVelY, float NewVelZ, Actor NewBase, float NewFloorX, float NewFloorY, float NewFloorZ)
 {
 	local vector NewLocation;
+
+	// The server decides the position of a flyer through ClientCoopSpaceWalkPos, a late correction would throw it out of the flight
+	if(bSpaceWalk)
+		return;
 
 	if(Pawn != None && Level.NetMode == NM_Client && Level.TimeSeconds >= NextCorrectionLog)
 	{
@@ -867,8 +1254,16 @@ simulated function FixHandSignalWeapon(float DeltaTime)
 	HandSignalIdleTime = 0;
 	DestroyClientAttachItem();
 
+	// Weapon.BringUp forgets the previous weapon when it was the hands (OldWeapon = None), and the blaster came instead of the
+	// weapon held before the panel (the user's game 2026-11-12, "weapons:" lines). The weapon held last goes back
 	if(Pawn.OldWeapon != None && Pawn.OldWeapon.WeaponType != WT_Marker)
 		Pawn.SwitchToLastWeapon();
+	else if(LastHeldWeapon != None && !LastHeldWeapon.bDeleteMe && LastHeldWeapon.Owner == Pawn)
+	{
+		Log("ModCoop: hands done, back to " $ LastHeldWeapon);
+		Pawn.OldWeapon = LastHeldWeapon;
+		Pawn.SwitchToLastWeapon();
+	}
 	else
 		SwitchWeapon(1);
 }
@@ -1201,8 +1596,73 @@ simulated function LogPawns()
 	Log("CoopDebug: Client living pawns=" $ Num);
 }
 
+/*
+ * In tactical mode APawn::PostRender draws the nickname in the pawn's EnhancedVisionColor (Actor+500, Engine.dll). The Delta members have
+ * theirs, a player's own commando (the host's PlayerCommando, a client's CoopCommando) has none: black, unreadable (the user's game
+ * 2026-11-14). Every player's pawn without a color gets #AFFFFC on this machine, the user's choice; once a second (pawns come and go).
+ * The color is also the pawn's outline in that mode, like the members have.
+ */
+simulated function CheckNameColors()
+{
+	local Pawn P;
+
+	if(Level.NetMode == NM_Standalone || Level.TimeSeconds < NextNameColorCheck)
+		return;
+
+	NextNameColorCheck = Level.TimeSeconds + 1;
+	CheckAccessoryOwners();
+
+	foreach DynamicActors(class'Pawn', P)
+	{
+		if(P.PlayerReplicationInfo == None || P.EnhancedVisionColor.R != 0 || P.EnhancedVisionColor.G != 0 || P.EnhancedVisionColor.B != 0)
+			continue;
+
+		P.EnhancedVisionColor.R = 175; // AF
+		P.EnhancedVisionColor.G = 255; // FF
+		P.EnhancedVisionColor.B = 252; // FC
+		P.EnhancedVisionColor.A = 255;
+	}
+}
+
+/*
+ * Client: armour pieces (Accessory: Squad40Head, Squad62Spine2, MercShoulderSpike_L...) hang on their pawn (Base). On a client their Owner
+ * never arrives (None, the server has the pawn) and they don't follow the pawn: test accessory measured Scorch's Squad62Spine2 staying
+ * in one place while Scorch walked 2000 units away. They still blocked traces: invisible pieces left around the level. CTPlayer.
+ * SelectTargetType turns a Flashlight or Accessory on a pawn into its Owner; with None it read Target.SquadMarker of nothing
+ * (CTGame.dll+0x2A5EA, the only place the target becomes None there), the guard of ModCoop.dll caught it and cleared the target (RAS_03A in
+ * the user's game; only the first 10 are logged). On a client the pieces don't take traces any more (the server decides every hit),
+ * and get their Owner like on the server. Once a second.
+ */
+simulated function CheckAccessoryOwners()
+{
+	local Actor A;
+
+	if(Level.NetMode != NM_Client || bNoAccessoryFix)
+		return;
+
+	foreach DynamicActors(class'Actor', A)
+	{
+		if(Pawn(A.Base) == None || !(A.IsA('Accessory') || A.IsA('Flashlight')))
+			continue;
+
+		if(A.Owner == None)
+			A.SetOwner(A.Base);
+
+		if(A.bCollideActors || A.bBlockZeroExtentTraces || A.bBlockNonZeroExtentTraces)
+		{
+			A.SetCollision(false, false, false);
+			A.bBlockZeroExtentTraces = false;
+			A.bBlockNonZeroExtentTraces = false;
+		}
+	}
+}
+
 event PlayerTick(float DeltaTime)
 {
+	CheckAmbientSounds();
+	CheckVisionMode();
+	CheckNameColors();
+
 	if(Level.NetMode == NM_Client)
 	{
 		// CTPlayer's target selection needs the teams
@@ -1219,6 +1679,7 @@ event PlayerTick(float DeltaTime)
 		DebugStep("CheckQuietWeapons");
 		CheckQuietWeapons();
 		CheckTurretPawn();
+		CheckSpaceWalk();
 		TraceWeapons();
 		ResetStaleHands();
 		DebugStep("EnsureClientTeams");
@@ -1228,7 +1689,7 @@ event PlayerTick(float DeltaTime)
 
 		// Spawned while the camera was still on the controller (the level was waiting for the clients): the client saw its own
 		// commando from inside and no weapon (GEO_05A, in the lift)
-		if(Pawn != None && ViewTarget != Pawn && !bBehindView && !IsInState('CoopWatching') && (IsInState('PlayerWalking') || IsInState('CoopLiftRide')))
+		if(Pawn != None && ViewTarget != Pawn && !bBehindView && !IsInState('CoopWatching') && (IsInState('PlayerWalking') || IsInState('CoopLiftRide') || IsInState('CoopSpaceWalk')))
 		{
 			Log("ModCoop: The camera was on " $ ViewTarget $ ", back to the own commando " $ Pawn);
 			SetViewTarget(Pawn);
@@ -1256,6 +1717,9 @@ event PlayerTick(float DeltaTime)
 		if(bTestNetJump)
 			TestNetJump(DeltaTime);
 		LogClientStatus();
+
+		if(WatchIcon != None)
+			WatchIconTick();
 
 		if(Level.TimeSeconds >= NextHostSkinCheck)
 		{
@@ -1466,6 +1930,13 @@ exec function Use()
 	{
 		Specialist = CoopGame(Level.Game).MarkerClient(TargetMarker);
 
+		// A sniper position goes to the AI members like in single player (see CoopGame.SnipeNeedsClient)
+		if(Specialist != None && TargetMarker.IsA('MarkerSnipe') && !CoopGame(Level.Game).SnipeNeedsClient(TargetMarker))
+		{
+			Log("ModCoop: " $ TargetMarker $ " ordered to the AI members, " $ Specialist.PlayerReplicationInfo.PlayerName $ " plays Sev");
+			Specialist = None;
+		}
+
 		if(Specialist != None)
 		{
 			Item = ActivateItem(TargetMarker.Anchor);
@@ -1571,8 +2042,13 @@ simulated function LogUse(string Step)
 
 	Text = "ModCoop: use " $ Step $ ": TargetType=" $ TargetType $ " Target=" $ Target $ " State=" $ GetStateName();
 
+	// ASquadMarker::GetMarkerUsability reads Pawn.Squad without a check: Use with no pawn (a dead host, the order of test snipe) crashed the
+	// host (Engine.dll+0x2AD93, test run 2026-11-14)
 	if(TargetMarker != None)
-		Text = Text $ " Marker=" $ TargetMarker $ " tag=" $ TargetMarker.Tag $ " class=" $ TargetMarker.Class.Name $ " state=" $ TargetMarker.GetStateName() $ " visible=" $ TargetMarker.AlwaysVisible $ " active=" $ TargetMarker.bMarkerActive $ " complete=" $ TargetMarker.bComplete $ " usability=" $ TargetMarker.GetMarkerUsability(Pawn);
+		Text = Text $ " Marker=" $ TargetMarker $ " tag=" $ TargetMarker.Tag $ " class=" $ TargetMarker.Class.Name $ " state=" $ TargetMarker.GetStateName() $ " visible=" $ TargetMarker.AlwaysVisible $ " active=" $ TargetMarker.bMarkerActive $ " complete=" $ TargetMarker.bComplete;
+
+	if(TargetMarker != None && Pawn != None)
+		Text = Text $ " usability=" $ TargetMarker.GetMarkerUsability(Pawn);
 
 	if(Pawn != None)
 	{
@@ -1652,6 +2128,16 @@ simulated event ETargetType SelectTargetType()
 
 	Found = Super.SelectTargetType();
 
+	/*
+	 * The marker icon of what the crosshair is on (the "+" over a bacta dispenser, the console's icon) is drawn by the helmet for
+	 * TargetMarker. ACTPlayer::SelectTargetType takes the marker of the item looked at (Target.SquadMarker) only for the leader of a
+	 * squad (Pawn.Squad.SquadLeader == Pawn): a client, with no squad of its own, never had it, while the host had (the user's
+	 * screenshots 2026-11-14). A client gets the item's marker when the server lets it see that marker (SyncMarkerVisibility). The
+	 * target type isn't changed: the item is still used by hand.
+	 */
+	if(Level.NetMode == NM_Client && Pawn != None && TargetMarker == None && Target != None && (Pawn.Squad == None || Pawn.Squad.SquadLeader != Pawn))
+		TargetMarker = ShownMarkerOf(Target);
+
 	// A turret with a marker is an order for the squad, not for a client: Use did nothing until the player stood right at it (GEO_04A, test turretnear)
 	if(Pawn != None && Found == TGT_Marker && Turret(Target) != None && (Pawn.Squad == None || Pawn.Squad.SquadLeader != Pawn))
 		Found = TGT_Default;
@@ -1678,6 +2164,8 @@ simulated event ETargetType SelectTargetType()
  */
 function ServerCoopUseTurret(Turret T)
 {
+	local Actor Hide;
+
 	if(Pawn == None || T == None || VSize(T.Location - Pawn.Location) > 600)
 		return;
 
@@ -1719,10 +2207,20 @@ function ServerCoopUseTurret(Turret T)
 	if(T.Gunner != Pawn)
 		return;
 
-	// PlayerManTurret hides the turret for the player looking through it, here that was everybody
+	// PlayerManTurret hides the turret for the player looking through it, here that was everybody. The walker's cannon hides the walker
+	// itself (ATTEWalkerCannon.TurretBase): the host saw it vanish while a client manned it (test walker, screenshots). Only the gunner's
+	// own copy is hidden (ClientCoopManTurret)
 	T.bHidden = false;
+	Hide = None;
+
+	if(ATTEWalkerCannon(T) != None && ATTEWalkerCannon(T).TurretBase != None)
+	{
+		Hide = ATTEWalkerCannon(T).TurretBase;
+		Hide.bHidden = false;
+	}
+
 	Log("CoopPlayer: " $ PlayerReplicationInfo.PlayerName $ " mans " $ T);
-	ClientCoopManTurret(T, T.Yaw, T.Pitch, T.Rotation.Pitch, T.Rotation.Yaw, T.Rotation.Roll);
+	ClientCoopManTurret(T, T.Yaw, T.Pitch, T.Rotation.Pitch, T.Rotation.Yaw, T.Rotation.Roll, Hide);
 }
 
 function ServerCoopTurretAim(int NewYaw, int NewPitch)
@@ -1760,7 +2258,7 @@ static function rotator TurretView(Turret T, int Yaw, int Pitch)
 	return R;
 }
 
-simulated function ClientCoopManTurret(Turret T, int StartYaw, int StartPitch, int BasePitch, int BaseYaw, int BaseRoll)
+simulated function ClientCoopManTurret(Turret T, int StartYaw, int StartPitch, int BasePitch, int BaseYaw, int BaseRoll, optional Actor HideAlso)
 {
 	local rotator Base;
 
@@ -1782,7 +2280,14 @@ simulated function ClientCoopManTurret(Turret T, int StartYaw, int StartPitch, i
 	SentTurretPitch = StartPitch;
 	T.bHidden = true;
 	TurretPawn = Pawn;
-	Log("ModCoop: Manning " $ T);
+
+	// The walker around its cannon, for this player's view only (see ServerCoopUseTurret)
+	TurretHidden = HideAlso;
+
+	if(HideAlso != None)
+		HideAlso.bHidden = true;
+
+	Log("ModCoop: Manning " $ T $ ", hidden for the view: " $ HideAlso);
 	GotoState('PlayerManningTurret');
 }
 
@@ -1817,6 +2322,9 @@ simulated function TraceWeapons()
 
 	if(Pawn == None)
 		return;
+
+	if(Pawn.Weapon != None && (Pawn.Weapon.WeaponType == WT_Primary || Pawn.Weapon.WeaponType == WT_Secondary))
+		LastHeldWeapon = Pawn.Weapon;
 
 	Trace = "Weapon=" $ WeaponTraceName(Pawn.Weapon) $ " Pending=" $ WeaponTraceName(Pawn.PendingWeapon) $ " Old=" $ WeaponTraceName(Pawn.OldWeapon);
 
@@ -1856,6 +2364,8 @@ simulated function ResetStaleHands()
  * weapon the player holds. In single player the hands go through DownWeapon first; the weapon of a client comes back through
  * ServerChangedWeapon and the hands of the server went on to Idle afterwards, for the rest of the level. On a turret they took the
  * turret's weapon away again and again (test charge with CoopTestUseFirst, "weapons:" lines). Bringing them up works from no state.
+ * Called every frame (CoopGame.Tick): once a second left up to a second of rifle and pistol swapping, 6 changes in 0.1 s after a
+ * panel (the user's game 2026-11-12, stopped at "parking the hands").
  */
 function ParkServerHands()
 {
@@ -1869,6 +2379,100 @@ function ParkServerHands()
 		Log("CoopPlayer: parking the hands of " $ PlayerReplicationInfo.PlayerName);
 		ServerHands.GotoState('');
 	}
+}
+
+/*
+ * Weapon changes of a client happen on the client, the server follows (Pawn.ServerChangedWeapon). The server also ran the single player
+ * code that picks a weapon after the bacta healer or the hands (CTPlayer.ReturnToWeapon, UsingItem.BeginState's ForceWeaponSwitch,
+ * SwitchWeapon): its copy of the client's last weapon is often None, so it picked the blaster and sent it to the client (the user's game
+ * 2026-11-14, RAS_01C: rifle, healer, rifle, then blaster on both sides, twice). For a client the server picks nothing now.
+ * The client: the healer and the hands make Weapon.BringUp forget the last weapon, the rifle or pistol held before them is used.
+ */
+simulated function bool IsRemoteOnServer()
+{
+	return Level.NetMode != NM_Client && Viewport(Player) == None;
+}
+
+function ReturnToWeapon()
+{
+	if(IsRemoteOnServer())
+		return;
+
+	if(Pawn != None && Pawn.Weapon != None && (Pawn.Weapon.WeaponType == WT_Marker || Pawn.Weapon.WeaponType == WT_Heal))
+		LogWeaponCall("ReturnToWeapon");
+
+	if(Pawn != None && (Pawn.OldWeapon == None || (Pawn.OldWeapon.WeaponType != WT_Primary && Pawn.OldWeapon.WeaponType != WT_Secondary)) &&
+	   LastHeldWeapon != None && !LastHeldWeapon.bDeleteMe && LastHeldWeapon.Owner == Pawn && Pawn.Weapon != LastHeldWeapon)
+		Pawn.OldWeapon = LastHeldWeapon;
+
+	Super.ReturnToWeapon();
+}
+
+/*
+ * BactaHealer.Idle.BeginState asks for the blaster (ForceWeaponSwitch(1)) when the healer goes idle without a friend to heal. In single
+ * player the healer is put down from NormalFire and never gets there. On a client it went to Idle after the revive, with the rifle
+ * already back in the hands, and swapped it for the blaster (test healweapon: "ForceWeaponSwitch 1 in PlayerWalking, holding" the rifle,
+ * as in the user's game). Only the healer and ACTION_Briefing call it directly, a key goes through SwitchWeapon (bSwitchWeaponCall).
+ * A direct call while a rifle or pistol is held does nothing; with the healer held it goes back to the weapon held before it.
+ */
+simulated function ForceWeaponSwitch(byte F)
+{
+	if(IsRemoteOnServer())
+		return;
+
+	if(F == 1)
+		LogWeaponCall("ForceWeaponSwitch " $ F);
+
+	if(F == 1 && !bSwitchWeaponCall && !bBriefing && Pawn != None && Pawn.Weapon != None)
+	{
+		if(Pawn.Weapon.WeaponType == WT_Primary || Pawn.Weapon.WeaponType == WT_Secondary)
+		{
+			Log("ModCoop: the healer's switch to the blaster ignored, holding " $ Pawn.Weapon);
+			return;
+		}
+
+		if(Pawn.Weapon.WeaponType == WT_Heal && LastHeldWeapon != None && !LastHeldWeapon.bDeleteMe && LastHeldWeapon.Owner == Pawn)
+		{
+			Log("ModCoop: the idle healer goes back to " $ LastHeldWeapon);
+			Pawn.OldWeapon = LastHeldWeapon;
+			Pawn.SwitchToLastWeapon();
+			return;
+		}
+	}
+
+	Super.ForceWeaponSwitch(F);
+}
+
+
+
+exec function SwitchWeapon(byte F)
+{
+	if(IsRemoteOnServer())
+		return;
+
+	LogWeaponCall("SwitchWeapon " $ F);
+	bSwitchWeaponCall = true;
+	Super.SwitchWeapon(F);
+	bSwitchWeaponCall = false;
+}
+
+// Which code changes the weapon (no stack traces in this engine): the caller's state and the weapons at that moment
+simulated function LogWeaponCall(string What)
+{
+	if(Pawn != None)
+		Log("ModCoop: weapon call " $ What $ " in " $ GetStateName() $ ", holding " $ Pawn.Weapon $ " (" $ Pawn.Weapon.GetStateName() $ ") pending " $ Pawn.PendingWeapon $ " old " $ Pawn.OldWeapon $ " target " $ TargetType);
+}
+
+exec function SwitchToBestWeapon()
+{
+	LogWeaponCall("SwitchToBestWeapon");
+	Super.SwitchToBestWeapon();
+}
+
+simulated function ClientSwitchToBestWeapon()
+{
+	LogWeaponCall("ClientSwitchToBestWeapon");
+	Super.ClientSwitchToBestWeapon();
 }
 
 simulated function BringUpUsingHands()
@@ -1898,6 +2502,10 @@ simulated function ClientCoopLeaveTurret()
 	if(Machine != None)
 		Machine.bHidden = false;
 
+	if(TurretHidden != None)
+		TurretHidden.bHidden = false;
+
+	TurretHidden = None;
 	Machine = None;
 	GotoState('PlayerWalking');
 
@@ -2122,6 +2730,10 @@ exec event ShowMenu(optional string MenuClass, optional string Title, optional s
 		Log("ModCoop: Skipped hint " $ Title);
 		return;
 	}
+
+	// The engine opens its pause menu by its own setting, not through CoopExtension.RedirectMenuClass
+	if(MenuClass == "" && Level.NetMode == NM_ListenServer && IsCoopHost())
+		MenuClass = "ModCoop.CoopPauseMenu";
 
 	Super.ShowMenu(MenuClass, Title, Text, PicName, NewLevel);
 }
@@ -2572,7 +3184,7 @@ simulated function CalcWatchView(out actor ViewActor, out vector CameraLocation,
  */
 simulated function FixEyeHeight()
 {
-	if(Pawn == None || !IsInState('PlayerWalking'))
+	if(Pawn == None || !(IsInState('PlayerWalking') || IsInState('CoopSpaceWalk')))
 		return;
 
 	// After a door breach (the AI had the pawn) the client's copy of the pawn had no controller: Pawn.UpdateEyeHeight set the eye
@@ -2688,6 +3300,31 @@ simulated function bool IsSquadIconMember(Pawn P)
 	return false;
 }
 
+/*
+ * Single player puts a new pawn in tactical vision (PlayerController.GivePawn, Possess: VisorModeDefault != 1, only standalone). Coop
+ * didn't, and the helmet shows the squad's names only in tactical vision (APawn::PostRender, InTacticalVisionMode). The local player's
+ * pawn gets it here too, as soon as it has its headlamp (GotoVisionMode needs it). Host and clients, both run it for themselves only.
+ */
+simulated function CheckVisionMode()
+{
+	if(Pawn == None || Pawn == VisionModePawn || Viewport(Player) == None || Pawn.Flashlight == None)
+		return;
+
+	VisionModePawn = Pawn;
+
+	if(VisorModeDefault != 1 && Pawn.CurrentUserVisionMode == 0)
+	{
+		// A briefing or a scene keeps the mode it found and puts it back at its end (PlayerController states): the host's pawn was put
+		// back to 0 that way (test 2026-11-12). Single player set it before them
+		SavedVisionMode = 1;
+
+		if(!bBriefing)
+			GotoVisionMode(1);
+
+		Log("ModCoop: vision mode " $ Pawn.CurrentUserVisionMode $ " (after a briefing or scene " $ SavedVisionMode $ ") for " $ Pawn);
+	}
+}
+
 // Emitters are not replicated: effects of doors, panels, droid dispensers and props the server spawned (see CoopGame.ForwardEffect)
 simulated function ClientCoopSpawnEffect(class<Emitter> EffectClass, vector EffectLocation, rotator EffectRotation, Actor AttachTo)
 {
@@ -2710,6 +3347,9 @@ simulated function ClientCoopObjectiveTracker(Actor A, vector Location, bool bSh
 {
 	if(Helmet == None)
 		return;
+
+	if(bShow != Helmet.bShowObjectiveTracker)
+		Log("ModCoop: objective tracker " $ bShow $ " " $ A $ " " $ Location);
 
 	if(!bShow)
 		Helmet.HideObjectiveTracker();
@@ -2807,6 +3447,12 @@ simulated function ClientCoopTestCommand(string Command)
 {
 	local ActivateItem Panel;
 	local Pawn FacingPawn;
+	local Inventory Inv;
+	local MarkerIconActor Icon;
+	local Mover Mov;
+	local Turret Tur;
+	local Actor A, Piece;
+	local vector Aim;
 
 	// Holding fire like the button (the console alias Fire doesn't work from a console command)
 	if(Command ~= "HoldFire" || Command ~= "ReleaseFire")
@@ -2857,6 +3503,93 @@ simulated function ClientCoopTestCommand(string Command)
 		return;
 	}
 
+	// Test only: the marker holograms near the pawn as this client has them
+	if(Command ~= "MarkerIcons")
+	{
+		foreach AllActors(class'MarkerIconActor', Icon)
+		{
+			if(Pawn != None && VSize(Icon.Location - Pawn.Location) < 800)
+				Log("CoopTest: icon " $ Icon.Class.Name $ " " $ Icon $ " hidden " $ Icon.bHidden $ " alpha " $ Icon.CurrentAlpha $ " morph " $ Icon.CurrentMorph $ " mesh " $ Icon.StaticMesh $ " state " $ Icon.GetStateName() $ " role " $ Icon.Role $ " dist " $ int(VSize(Icon.Location - Pawn.Location)) $ " anchor " $ SquadMarker(Icon).Anchor $ " allowed " $ IsMarkerShown(SquadMarker(Icon)) $ " target " $ Target $ " TargetMarker " $ TargetMarker);
+		}
+
+		return;
+	}
+
+	// Test only: the nearest hologram, shown at full alpha, then every change of it logged each frame (WatchIconTick)
+	if(Command ~= "WatchIcon")
+	{
+		foreach AllActors(class'MarkerIconActor', Icon)
+		{
+			if(Pawn != None && (WatchIcon == None || VSize(Icon.Location - Pawn.Location) < VSize(WatchIcon.Location - Pawn.Location)))
+				WatchIcon = Icon;
+		}
+
+		WatchIcon.bHidden = false;
+		WatchIcon.CurrentAlpha = 1;
+		WatchIcon.CurrentMorph = 1;
+		bIconWatchHidden = false;
+		WatchAlpha = 1;
+		class'CoopPlayer'.default.WatchIcon = WatchIcon;
+		Log("CoopTest: watch " $ WatchIcon $ " state " $ WatchIcon.GetStateName() $ " at " $ Level.TimeSeconds);
+		return;
+	}
+
+	// Test only: the holograms near the pawn shown at full alpha (does that draw them?)
+	if(Command ~= "ForceIcons")
+	{
+		foreach AllActors(class'MarkerIconActor', Icon)
+		{
+			if(Pawn != None && VSize(Icon.Location - Pawn.Location) < 800)
+			{
+				Icon.bHidden = false;
+				Icon.CurrentAlpha = 1;
+				Icon.CurrentMorph = 1;
+
+				Log("CoopTest: icon forced " $ Icon);
+			}
+		}
+
+		return;
+	}
+
+	// Test only: bring up the weapon of that class (HoldWeapon DC17mSniper)
+	if(Left(Command, 11) ~= "HoldWeapon ")
+	{
+		for(Inv = Pawn.Inventory; Inv != None; Inv = Inv.Inventory)
+		{
+			if(Weapon(Inv) != None && string(Inv.Class.Name) ~= Mid(Command, 11) && Pawn.Weapon != Inv)
+			{
+				Pawn.PendingWeapon = Weapon(Inv);
+
+				if(Pawn.Weapon != None)
+					Pawn.Weapon.PutDown(Pawn.PendingWeapon);
+				else
+					Pawn.ChangedWeapon();
+			}
+		}
+
+		Log("ModCoop: Test HoldWeapon " $ Mid(Command, 11) $ ": " $ Pawn.Weapon $ " pending " $ Pawn.PendingWeapon);
+		return;
+	}
+
+	// Test only: revive the host with the bacta healer, as if the crosshair was on him and the use key held until he is up
+	if(Command ~= "ReviveHost")
+	{
+		foreach DynamicActors(class'Pawn', FacingPawn)
+		{
+			if(FacingPawn != Pawn && FacingPawn.bIncapacitated && FacingPawn.IsA('PlayerCommando'))
+			{
+				Target = FacingPawn;
+				TargetType = TGT_FriendToHeal;
+				bUse = true;
+				Log("ModCoop: Test ReviveHost " $ FacingPawn);
+				Use();
+			}
+		}
+
+		return;
+	}
+
 	if(Command ~= "StopPanel")
 	{
 		bUse = false;
@@ -2887,6 +3620,131 @@ simulated function ClientCoopTestCommand(string Command)
 	if(Command ~= "NetJump")
 	{
 		bTestNetJump = true;
+		return;
+	}
+
+	// Living pawns other than commandos as this client has them (see CoopGame.TestEnemyText)
+	if(Command ~= "PawnLog")
+	{
+		foreach DynamicActors(class'Pawn', FacingPawn)
+		{
+			if(FacingPawn.Health > 0 && !FacingPawn.IsA('CloneCommando'))
+				Command = Command $ " " $ FacingPawn.Class.Name $ "@" $ int(FacingPawn.Location.X) $ "," $ int(FacingPawn.Location.Y);
+		}
+
+		Log("CoopTest: client pawns: " $ Command);
+		return;
+	}
+
+	// What APawn::PostRender would write over each commando (EngineHUD names, see CoopExtension.PawnHudName)
+	if(Command ~= "HudNames")
+	{
+		foreach DynamicActors(class'Pawn', FacingPawn)
+		{
+			if(FacingPawn.IsA('CloneCommando'))
+				Log("CoopTest: hud names: " $ FacingPawn.Class.Name $ " description '" $ FacingPawn.GetHudDescription() $ "' nickname '" $ FacingPawn.GetHudNickname() $ "'");
+		}
+
+		return;
+	}
+
+	// Test only: this client's copy of the movers with a tag
+	if(Left(Command, 9) ~= "MoverLog ")
+	{
+		foreach AllActors(class'Mover', Mov)
+		{
+			if(string(Mov.Tag) ~= Mid(Command, 9))
+			{
+				Log("CoopTest: mover: client " $ Mov $ " Key=" $ Mov.KeyNum $ " Stop=" $ Mov.ScriptTriggeredKeyframe $ " Moving=" $ Mov.bInterpolating $ " Loc=" $ Mov.Location $ " pawn Loc=" $ Pawn.Location $ " Base=" $ Pawn.Base);
+
+				foreach DynamicActors(class'Actor', A)
+				{
+					if(A.Base == Mov || A.Tag == 'Walker')
+						Log("CoopTest: mover: client on it " $ A $ " (" $ A.Class.Name $ ") Base=" $ A.Base $ " Loc=" $ A.Location $ " Rel=" $ A.RelativeLocation $ " Physics=" $ A.Physics $ " CollideWorld=" $ A.bCollideWorld $ " Collide=" $ A.bCollideActors $ " Role=" $ A.Role);
+				}
+			}
+		}
+
+		return;
+	}
+
+	// Test only: flashlights and accessories on pawns, with their owners (CTPlayer.SelectTargetType turns them into their Owner)
+	if(Command ~= "AttachedLog")
+	{
+		foreach AllActors(class'Actor', A)
+		{
+			if((A.IsA('Flashlight') || A.IsA('Accessory')) && Pawn(A.Base) != None)
+				Log("CoopTest: attached: " $ A.Class.Name $ " on " $ A.Base.Class.Name $ " Owner=" $ A.Owner $ " Role=" $ A.Role $ " Collide=" $ A.bCollideActors $ " ZeroTrace=" $ A.bBlockZeroExtentTraces $ " Hidden=" $ A.bHidden);
+		}
+
+		return;
+	}
+
+	// Test only: turn to the closest armour piece of another pawn (see CheckAccessoryOwners); "AccessoryFix 0/1" turns the fix off/on
+	if(Command ~= "AimAccessory")
+	{
+		foreach DynamicActors(class'Actor', A)
+		{
+			// The piece that sticks out of its pawn's collision the most: inside it the trace hits the pawn first
+			if(A.IsA('Accessory') && Pawn(A.Base) != None && A.Base != Pawn && VSize(A.Location - Pawn.Location) < 1500 && FastTrace(A.Location, Pawn.Location + Pawn.EyePosition()) &&
+			   (Piece == None || VSize2D(A.Location - A.Base.Location) - A.Base.CollisionRadius > VSize2D(Piece.Location - Piece.Base.Location) - Piece.Base.CollisionRadius))
+				Piece = A;
+		}
+
+		// At the part of the piece outside the pawn: its center pushed away from the pawn's axis
+		if(Piece != None)
+		{
+			Aim = Piece.Location;
+			Aim += Normal(Piece.Location - Piece.Base.Location) * vect(1,1,0) * 6;
+			SetRotation(rotator(Aim - (Pawn.Location + Pawn.EyePosition())));
+			Log("CoopTest: aimaccessory: out of the pawn by " $ int(VSize2D(Piece.Location - Piece.Base.Location) - Piece.Base.CollisionRadius));
+		}
+
+		Log("CoopTest: aimaccessory: " $ Piece $ " (" $ Piece.Class.Name $ ") on " $ Piece.Base $ " Owner=" $ Piece.Owner $ " dist " $ int(VSize(Piece.Location - Pawn.Location)) $ " Target=" $ Target $ " TargetType=" $ TargetType $ " fix " $ !bNoAccessoryFix);
+		return;
+	}
+
+	if(Left(Command, 13) ~= "AccessoryFix ")
+	{
+		bNoAccessoryFix = Mid(Command, 13) == "0";
+
+		// Without the fix the pieces are as a client gets them
+		if(bNoAccessoryFix)
+		{
+			foreach DynamicActors(class'Actor', A)
+			{
+				if(Pawn(A.Base) != None && A.Owner == A.Base && (A.IsA('Accessory') || A.IsA('Flashlight')))
+					A.SetOwner(None);
+			}
+		}
+
+		Log("CoopTest: aimaccessory: fix " $ !bNoAccessoryFix);
+		return;
+	}
+
+	// Test only: the visor mode, see CoopGame test namecolor
+	if(Command ~= "VisionLog")
+	{
+		Log("CoopTest: namecolor: client mode " $ Pawn.CurrentUserVisionMode $ " flashlight " $ Pawn.Flashlight $ " tactical " $ InTacticalVisionMode() $ " visor default " $ VisorModeDefault $ " view " $ Rotation $ " at " $ Pawn.Location $ " ViewTarget " $ ViewTarget $ " state " $ GetStateName());
+
+		foreach DynamicActors(class'Pawn', FacingPawn)
+		{
+			if(FacingPawn.PlayerReplicationInfo != None)
+				Log("CoopTest: namecolor: client sees " $ FacingPawn $ " color " $ FacingPawn.EnhancedVisionColor.R $ "," $ FacingPawn.EnhancedVisionColor.G $ "," $ FacingPawn.EnhancedVisionColor.B);
+		}
+
+		return;
+	}
+
+	// Test only: Use as the player presses it, on what the crosshair is on now
+	if(Command ~= "UseLooked")
+	{
+		Log("CoopTest: uselooked: Target=" $ Target $ " TargetType=" $ TargetType $ " State=" $ GetStateName() $ " Loc=" $ Pawn.Location $ " view=" $ Rotation $ " near turret " $ FindNearTurret());
+
+		foreach DynamicActors(class'Turret', Tur)
+			Log("CoopTest: uselooked: " $ TurretCollision(Tur) $ " dist " $ int(VSize(Tur.Location - Pawn.Location)) $ " dot " $ (Normal(Tur.Location - Pawn.Location) dot vector(Rotation)) $ " free " $ FastTrace(Tur.Location, Pawn.Location + Pawn.EyePosition()) $ " Gunner=" $ Tur.Gunner);
+
+		Use();
 		return;
 	}
 
@@ -3194,7 +4052,12 @@ function Possess(Pawn APawn)
 function bool RestartGame()
 {
 	if(IsCoopHost())
+	{
+		if(CoopGame(Level.Game) != None && CoopGame(Level.Game).bRespawningHost)
+			return false;
+
 		return Super.RestartGame();
+	}
 
 	return false; // Clients just respawn
 }
@@ -3259,6 +4122,8 @@ function AutoSave()
 {
 	if(Level.NetMode != NM_ListenServer)
 		Super.AutoSave();
+	else if(CoopGame(Level.Game) != None)
+		CoopGame(Level.Game).SaveCheckpoint();
 }
 
 exec function QuickSave()
@@ -3429,6 +4294,47 @@ state CoopWatching
 	function EndState()
 	{
 		SetCoopHUDHidden(false);
+	}
+}
+
+/*
+ * Flying with the host on RAS_01A (client, see CoopGame.SpawnClient and ClientCoopSpaceWalkPos): the camera is free and the first person weapon stays
+ * in the hands, but nothing is sent: without ReplicateMove there is no ServerMove, so the server has no reason to send a correction.
+ */
+state CoopSpaceWalk
+{
+	ignores SeePlayer, HearNoise, Bump;
+
+	exec function Fire(optional float F) {}
+	exec function AltFire(optional float F) {}
+	exec function Use() {}
+	exec function Jump(optional float F) {}
+	exec function ThrowGrenade(optional float F) {}
+	exec function SwitchWeapon(byte F) {}
+
+	function PlayerMove(float DeltaTime)
+	{
+		local vector ToTarget;
+		local float Distance;
+
+		if(Pawn == None)
+			return;
+
+		UpdateRotation(DeltaTime, 1);
+
+		// Only SetLocation moves the flyer here, physics would pull it down between the updates
+		if(Pawn.Physics != PHYS_None)
+			Pawn.SetPhysics(PHYS_None);
+
+		Pawn.Velocity = vect(0,0,0);
+		Pawn.Acceleration = vect(0,0,0);
+		ToTarget = SpaceWalkTarget - Pawn.Location;
+		Distance = VSize(ToTarget);
+
+		if(Distance > SPACE_WALK_SNAP_DISTANCE)
+			Pawn.SetLocation(SpaceWalkTarget);
+		else if(Distance > 0.5)
+			Pawn.SetLocation(Pawn.Location + ToTarget * FMin(1.0, DeltaTime * SPACE_WALK_FOLLOW_RATE));
 	}
 }
 
