@@ -1,4 +1,4 @@
-class CoopPlayer extends CTPlayer;
+class CoopPlayer extends CTPlayer dependson(CoopMotionState);
 
 #exec OBJ LOAD FILE="CTGame.u"
 #exec OBJ LOAD FILE="CTCharacters.u"
@@ -57,19 +57,16 @@ var float       NextServerBlockLog;
 var Pawn        EyeFixedPawn;
 var float       NextStatusLog;        // Client only: see LogClientStatus         // Client only: see FixEyeHeight
 var float       TakeoverTime;    // Server only: Level.TimeSeconds of the last takeover (see CoopGame.TakeOver)
-// See SmoothProxies
-struct SmoothedPawn
-{
-	var Pawn P;
-	var vector LastLocation;
-	var vector LastVelocity;
-	var vector Offset;
-	var vector BasePrePivot;
-	var vector UpdateLocation;  // Where the last update without a velocity put it
-	var float UpdateTime;
-	var float ChaseSpeed;       // Speed that brings the mesh there by the time the next update comes
-};
-var array<SmoothedPawn> SmoothedPawns;
+// Motion samples and render transforms are local to one connection and map.
+var transient array<CoopProxyTrack> ProxyTracks;
+var transient CoopMotionClock SnapshotClock;
+var transient CoopMotionSender SnapshotSender;
+var transient CoopCombatDictionary CombatDictionary;
+var transient int LastCombatPacketBytes, RequestedCoopNetRate;
+var transient float NextConnectionRateCheck, PresentationDelta;
+var transient float NextProxyDiscovery, NextMotionInterest;
+var transient int MotionInterestCursor;
+var bool bDisableExtrapolation, bDisablePresentation, bUseMotionCurves;
 var vector      BlockCheckLocation;   // Client only: see CheckBlocked
 var float       BlockCheckTime;
 var float       NextBlockLog;
@@ -167,6 +164,10 @@ const SPACE_WALK_FOLLOW_RATE = 8.0;         // Share of the distance to the targ
 
 replication
 {
+    reliable if(Role==ROLE_Authority) ClientCombatName;
+    reliable if(Role<ROLE_Authority) ServerCoopNetRate;
+    unreliable if(Role==ROLE_Authority) ClientCombatPair;
+    unreliable if(Role<ROLE_Authority) ServerMotionInterest;
 	reliable if(Role == ROLE_Authority)
 		ClientCoopMessage, ClientCoopPawnRevived, ClientCoopSetIncapacitated, ClientCoopSetIdleState, ClientCoopSetPanelState, ClientCoopTakeoverCamera, ClientCoopSetActorCollision;
 	reliable if(Role == ROLE_Authority)
@@ -215,6 +216,7 @@ simulated function ClientCoopPrepareTravel(string MapName)
 	if(Level.NetMode != NM_Client)
 		return;
 
+	ClearProxyBuffers();
 	class'CoopConfig'.static.ApplyTravelTimeouts();
 	Log("ModCoop: level change, waiting for the host up to " $ class'CoopConfig'.default.TravelConnectTimeout $ " s");
 
@@ -267,6 +269,23 @@ simulated function FindLoadingInfo(string MapName, out string MenuClass, out str
 }
 
 // See CoopConfig.NetClientRate. The server limits it to its own setting. Not saved to the config.
+function ServerCoopNetRate(int DesiredRate)
+{
+    RequestedCoopNetRate=Clamp(DesiredRate,5000,Max(5000,class'CoopConfig'.default.NetClientRate));
+    NextConnectionRateCheck=0;
+    EnsureCoopConnectionRate();
+}
+
+function EnsureCoopConnectionRate()
+{
+    local int Rate;
+    if(Level.NetMode==NM_Client || Level.TimeSeconds<NextConnectionRateCheck) return;
+    NextConnectionRateCheck=Level.TimeSeconds+1;
+    Rate=RequestedCoopNetRate;
+    if(Rate==0) Rate=class'CoopConfig'.default.NetClientRate;
+    class'CoopNative'.static.SetCoopConnectionRate(self,Clamp(Rate,5000,Max(5000,class'CoopConfig'.default.NetClientRate)));
+}
+
 simulated function SetCoopNetSpeed()
 {
 	local string CommandLine;
@@ -279,6 +298,7 @@ simulated function SetCoopNetSpeed()
 	// SetNetSpeed is limited by MaxClientRate of the client's own net driver (10000 in System.ini)
 	class'CoopNative'.static.SetNetRates(class'CoopConfig'.default.NetClientRate, class'CoopConfig'.default.NetTickRate);
 	SetNetSpeed(class'CoopConfig'.default.NetClientRate);
+    if(Level.NetMode==NM_Client) ServerCoopNetRate(class'CoopConfig'.default.NetClientRate);
 	Log("ModCoop: Net speed is now " $ Player.CurrentNetSpeed);
 
 	// Tests on one PC: simulate an internet connection (-CoopPktLag=<ms>)
@@ -287,7 +307,7 @@ simulated function SetCoopNetSpeed()
 	if(InStr(Caps(CommandLine), "-COOPPKTLAG=") != -1)
 	{
 		Lag = int(Mid(CommandLine, InStr(Caps(CommandLine), "-COOPPKTLAG=") + 12));
-		Log("ModCoop: Simulating lag " $ Lag $ ": " $ ConsoleCommand("PKTLAG " $ Lag) $ " / " $ ConsoleCommand("PKTLAGVARIANCE " $ (Lag / 3)));
+		Log("ModCoop: Simulating lag " $ Lag $ ": " $ ConsoleCommand("PKTLAG=" $ Lag) $ " / " $ ConsoleCommand("PKTLAGVARIANCE=" $ (Lag / 3)));
 	}
 }
 
@@ -1276,108 +1296,230 @@ simulated function FixHandSignalWeapon(float DeltaTime)
  * After a takeover the server picks the current grenade while creating the inventory. The reference reached the client before the
  * grenades themselves and wasn't sent again: no grenade on the HUD and none could be thrown. Same choice as Pawn.CreateInventory.
  */
-/*
- * Between network updates a client moves other pawns by their velocity. Fast and erratic enemies (Geonosians flying and jumping
- * around) end up far from where the server has them and jump to the new position with every update: 60-130 units several times
- * per second at 50-90 ms latency. The jump is hidden by drawing the mesh at the old position (PrePivot) and moving it to the real
- * one within about a tenth of a second. Collision and hits are not affected.
- * Pawns moved by an animation (the ropes) or without physics arrive with velocity 0, 6-20 times a second (test rope with NetJump): the
- * client has nothing to move them with between updates and predicting from the last two overshoots (updates are irregular). The mesh
- * then moves at a steady speed that reaches each update's position when the next one is due: it is about one update behind.
- */
+simulated function ClearProxyBuffers()
+{
+    local int i;
+    for(i=0;i<ProxyTracks.Length;++i)
+        if(ProxyTracks[i]!=None)
+        {
+            ProxyTracks[i].Restore();
+            ProxyTracks[i].Destroy();
+        }
+    ProxyTracks.Length=0;
+    SnapshotClock=None;
+    NextProxyDiscovery=0;
+}
+
+event Destroyed()
+{
+    ClearProxyBuffers();
+    if(SnapshotSender!=None) SnapshotSender.Destroy();
+    Super.Destroyed();
+}
+
+simulated function bool CanSmoothProxy(Pawn P)
+{
+    return P!=None && P!=Pawn && !P.bDeleteMe && P.Role==ROLE_SimulatedProxy &&
+        P.Health>0 && !P.bHidden && P.DrawType==DT_Mesh && !P.IsA('Turret') &&
+        (P.Base==None || P.Base.bStatic || P.Base.IsA('LevelInfo'));
+}
+
+simulated function CoopProxyTrack ProxyTrackFor(Pawn P, optional bool Create)
+{
+    local int i;
+    local CoopProxyTrack T;
+    for(i=0;i<ProxyTracks.Length;++i)
+        if(ProxyTracks[i]!=None && ProxyTracks[i].P==P) return ProxyTracks[i];
+    if(!Create) return None;
+    if(!bDisablePresentation)
+    {
+        T=Spawn(class'CoopPresentationTrack',self);
+        if(T!=None)
+        {
+            CoopPresentationTrack(T).bDisablePrediction=bDisableExtrapolation;
+            CoopPresentationTrack(T).bLinearCurves=!bUseMotionCurves;
+        }
+    }
+    else if(bDisableExtrapolation) T=Spawn(class'CoopMeshSnapshotTrack',self);
+    else T=Spawn(class'CoopExtrapolationTrack',self);
+    if(T!=None)
+    {
+        T.Init(P,Level.TimeSeconds);
+        ProxyTracks[ProxyTracks.Length]=T;
+    }
+    return T;
+}
+
+exec function CoopPresentation(bool Enabled)
+{
+    bDisablePresentation=!Enabled;
+    ClearProxyBuffers();
+    ClientMessage("Buffered facing and locomotion: " $ Enabled);
+}
+
+exec function CoopMotionCurves(bool Enabled)
+{
+    bUseMotionCurves=Enabled;
+    ClearProxyBuffers();
+    ClientMessage("Experimental position curves: " $ Enabled);
+}
+
+simulated function BeginProxyRender()
+{
+    local int i;
+    local CoopPresentationTrack T;
+    if(Level.NetMode!=NM_Client) return;
+    for(i=0;i<ProxyTracks.Length;++i)
+    {
+        T=CoopPresentationTrack(ProxyTracks[i]);
+        if(T!=None) T.BeginRender(Level.TimeSeconds,PresentationDelta);
+    }
+}
+
+simulated function EndProxyRender()
+{
+    local int i;
+    local CoopPresentationTrack T;
+    for(i=0;i<ProxyTracks.Length;++i)
+    {
+        T=CoopPresentationTrack(ProxyTracks[i]);
+        if(T!=None) T.EndRender();
+    }
+}
+
+exec function CoopPrediction(bool Enabled)
+{
+    bDisableExtrapolation=!Enabled;
+    ClearProxyBuffers();
+    ClientMessage("Bounded enemy prediction: " $ Enabled);
+}
+
+simulated function vector MotionViewOrigin()
+{
+    if(Pawn!=None) return Pawn.Location;
+    if(ViewTarget!=None) return ViewTarget.Location;
+    return Location;
+}
+
+simulated function UpdateMotionInterest()
+{
+    local int i,j,n;
+    local CoopSnapshotTrack T;
+    local Pawn Batch[4];
+    local Actor Viewer;
+    local vector Eye;
+    if(Level.TimeSeconds<NextMotionInterest || ProxyTracks.Length==0) return;
+    NextMotionInterest=Level.TimeSeconds+0.05;
+    Viewer=Pawn; if(Viewer==None) Viewer=ViewTarget;
+    if(Viewer==None) return;
+    Eye=MotionViewOrigin();
+    for(i=0;i<ProxyTracks.Length && n<4;++i)
+    {
+        if(MotionInterestCursor>=ProxyTracks.Length) MotionInterestCursor=0;
+        j=MotionInterestCursor; ++MotionInterestCursor;
+        T=CoopSnapshotTrack(ProxyTracks[j]);
+        if(T==None || !CanSmoothProxy(T.P) || Level.TimeSeconds<T.NextInterest ||
+           VSize(T.P.Location-Eye)>5800) continue;
+        if(Level.TimeSeconds-T.P.LastRenderTime>1 && VSize(T.P.Location-Eye)>1500) continue;
+        T.NextInterest=Level.TimeSeconds+1;
+        Batch[n]=T.P; ++n;
+    }
+    if(n>0) ServerMotionInterest(Batch[0],Batch[1],Batch[2],Batch[3]);
+}
+
+function ServerMotionInterest(Pawn P0, Pawn P1, Pawn P2, Pawn P3)
+{
+    if(Level.NetMode==NM_Client || Viewport(Player)!=None) return;
+    if(SnapshotSender==None)
+    {
+        SnapshotSender=Spawn(class'CoopMotionSender',self);
+        if(SnapshotSender==None) return;
+        SnapshotSender.PC=self;
+    }
+    SnapshotSender.Subscribe(P0); SnapshotSender.Subscribe(P1);
+    SnapshotSender.Subscribe(P2); SnapshotSender.Subscribe(P3);
+}
+
+function SendCombatPair(int Sequence,float Stamp,Pawn P0,Pawn P1)
+{
+    local string X0,X1;
+    if(CombatDictionary==None) CombatDictionary=new class'CoopCombatDictionary';
+    X0=class'CoopNative'.static.PackCombatWire(CombatDictionary.Encode(self,SnapshotSender.PoseFor(P0)));
+    X1=class'CoopNative'.static.PackCombatWire(CombatDictionary.Encode(self,SnapshotSender.PoseFor(P1)));
+    LastCombatPacketBytes=Len(X0)+Len(X1)+64;
+    ClientCombatPair(Sequence,Stamp,P0,X0,P1,X1);
+}
+
+simulated function ClientCombatPair(int Sequence,float Stamp,Pawn P0,string X0,Pawn P1,string X1)
+{
+    local CoopMotionState.WirePose W;
+    if(class'CoopNative'.static.UnpackCombatWire(X0,W)) ClientCombatPose(Sequence,Stamp,P0,W);
+    if(class'CoopNative'.static.UnpackCombatWire(X1,W)) ClientCombatPose(Sequence,Stamp,P1,W);
+}
+
+simulated function ClientCombatName(int Id,string Text)
+{
+    if(Level.NetMode!=NM_Client) return;
+    if(CombatDictionary==None) CombatDictionary=new class'CoopCombatDictionary';
+    CombatDictionary.Register(Id,Text);
+}
+
+simulated function ClientCombatPose(int Sequence, float Stamp, Pawn P, CoopMotionState.WirePose Wire)
+{
+    local CoopSnapshotTrack Track;
+    if(Level.NetMode!=NM_Client || !CanSmoothProxy(P)) return;
+    Track=CoopSnapshotTrack(ProxyTrackFor(P,true));
+    if(Track==None) return;
+    if(SnapshotClock==None) SnapshotClock=new class'CoopMotionClock';
+    SnapshotClock.Observe(Level.TimeSeconds,Stamp,Sequence);
+    if(CombatDictionary==None) CombatDictionary=new class'CoopCombatDictionary';
+    if(CoopPresentationTrack(Track)!=None)
+        CoopPresentationTrack(Track).ReceivePose(Level.TimeSeconds,Stamp,CombatDictionary.Decode(Wire),Sequence,SnapshotClock);
+    else Track.ReceiveSnapshot(Level.TimeSeconds,Stamp,Wire.Position,Sequence,SnapshotClock);
+}
+
+simulated function ProxyNetworkReceived(Pawn P)
+{
+    local CoopProxyTrack Track;
+    local vector Position, Velocity;
+    local int Sequence;
+    local bool ReceivedMovement;
+    if(!CanSmoothProxy(P)) return;
+    ReceivedMovement=class'CoopNative'.static.ReadProxyMovement(P,Position,Velocity,Sequence);
+    Track=ProxyTrackFor(P);
+    if(Track==None && ReceivedMovement)
+    {
+        Track=ProxyTrackFor(P,true);
+        if(Track!=None) Track.ResetAt(Level.TimeSeconds,Position);
+    }
+    if(Track==None) return;
+    if(ReceivedMovement) Track.Receive(Level.TimeSeconds,Position,Velocity,Sequence);
+    else if(!Track.bRawReceiver) Track.Receive(Level.TimeSeconds,P.Location,P.Velocity);
+}
+
 simulated function SmoothProxies(float DeltaTime)
 {
-	local Pawn P;
-	local int i;
-	local vector Error;
-	local float ErrorSize;
-
-	DebugStep("SmoothProxies: removing");
-
-	for(i = SmoothedPawns.Length - 1; i >= 0; --i)
-	{
-		P = SmoothedPawns[i].P;
-
-		if(P == None || P.bDeleteMe || P.Health <= 0 || P.Role != ROLE_SimulatedProxy)
-		{
-			if(P != None && !P.bDeleteMe)
-				P.PrePivot = SmoothedPawns[i].BasePrePivot;
-
-			SmoothedPawns.Remove(i, 1);
-		}
-	}
-
-	foreach DynamicActors(class'Pawn', P)
-	{
-		if(P == Pawn || P.Role != ROLE_SimulatedProxy || P.Health <= 0 || P.bHidden || P.DrawType != DT_Mesh)
-			continue;
-
-		for(i = 0; i < SmoothedPawns.Length; ++i)
-		{
-			if(SmoothedPawns[i].P == P)
-				break;
-		}
-
-		if(i == SmoothedPawns.Length)
-		{
-			SmoothedPawns.Length = i + 1;
-			SmoothedPawns[i].P = P;
-			SmoothedPawns[i].LastLocation = P.Location;
-			SmoothedPawns[i].LastVelocity = P.Velocity;
-			SmoothedPawns[i].BasePrePivot = P.PrePivot;
-			continue;
-		}
-
-		DebugStep("SmoothProxies: " $ P);
-		if(VSize(P.Velocity) < 1 && VSize(SmoothedPawns[i].LastVelocity) < 1)
-		{
-			// The mesh stays where it was drawn
-			SmoothedPawns[i].Offset += SmoothedPawns[i].LastLocation - P.Location;
-			ErrorSize = VSize(SmoothedPawns[i].Offset);
-
-			if(ErrorSize > 1500) // Teleported
-			{
-				SmoothedPawns[i].Offset = vect(0,0,0);
-				ErrorSize = 0;
-			}
-
-			if(P.Location != SmoothedPawns[i].UpdateLocation)
-			{
-				SmoothedPawns[i].ChaseSpeed = ErrorSize / FClamp(Level.TimeSeconds - SmoothedPawns[i].UpdateTime, 0.03, 0.25);
-				SmoothedPawns[i].UpdateLocation = P.Location;
-				SmoothedPawns[i].UpdateTime = Level.TimeSeconds;
-			}
-
-			if(ErrorSize <= SmoothedPawns[i].ChaseSpeed * DeltaTime)
-				SmoothedPawns[i].Offset = vect(0,0,0);
-			else
-				SmoothedPawns[i].Offset -= Normal(SmoothedPawns[i].Offset) * SmoothedPawns[i].ChaseSpeed * DeltaTime;
-
-			P.PrePivot = SmoothedPawns[i].BasePrePivot + SmoothedPawns[i].Offset;
-			SmoothedPawns[i].LastLocation = P.Location;
-			SmoothedPawns[i].LastVelocity = P.Velocity;
-			continue;
-		}
-
-		SmoothedPawns[i].UpdateLocation = P.Location;
-		SmoothedPawns[i].UpdateTime = Level.TimeSeconds;
-		Error = P.Location - (SmoothedPawns[i].LastLocation + SmoothedPawns[i].LastVelocity * DeltaTime);
-		ErrorSize = VSize(Error);
-
-		if(ErrorSize > 300) // Teleported
-			SmoothedPawns[i].Offset = vect(0,0,0);
-		else if(ErrorSize > 2)
-			SmoothedPawns[i].Offset -= Error;
-
-		SmoothedPawns[i].Offset *= FMax(0, 1 - DeltaTime * 8);
-
-		if(VSize(SmoothedPawns[i].Offset) > 150)
-			SmoothedPawns[i].Offset = Normal(SmoothedPawns[i].Offset) * 150;
-
-		P.PrePivot = SmoothedPawns[i].BasePrePivot + SmoothedPawns[i].Offset;
-		SmoothedPawns[i].LastLocation = P.Location;
-		SmoothedPawns[i].LastVelocity = P.Velocity;
-	}
+    local Pawn P;
+    local int i;
+    for(i=ProxyTracks.Length-1;i>=0;--i)
+        if(ProxyTracks[i]==None || ProxyTracks[i].bDeleteMe || !CanSmoothProxy(ProxyTracks[i].P))
+        {
+            if(ProxyTracks[i]!=None)
+            {
+                ProxyTracks[i].Restore();
+                ProxyTracks[i].Destroy();
+            }
+            ProxyTracks.Remove(i,1);
+        }
+    // Packet notifications discover moving proxies between idle scans.
+    if(Level.TimeSeconds>=NextProxyDiscovery)
+    {
+        NextProxyDiscovery=Level.TimeSeconds+0.25;
+        foreach DynamicActors(class'Pawn',P)
+            if(CanSmoothProxy(P)) ProxyTrackFor(P,true);
+    }
+    for(i=0;i<ProxyTracks.Length;++i) ProxyTracks[i].Draw(Level.TimeSeconds,DeltaTime);
+    UpdateMotionInterest();
 }
 
 simulated function EnsureGrenade()
@@ -1665,6 +1807,8 @@ event PlayerTick(float DeltaTime)
 
 	if(Level.NetMode == NM_Client)
 	{
+		EndProxyRender();
+		PresentationDelta=DeltaTime;
 		// CTPlayer's target selection needs the teams
 		if(Level.GRI == None)
 		{

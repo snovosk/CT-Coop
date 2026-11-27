@@ -43,6 +43,7 @@ var float TravelSwitchDelay;     // Seconds between the travel order to the clie
 // The multiplayer defaults (10000 bytes/s per client at 20 updates per second, clients on the internet even only 5000) are far too
 // little for the dozens of AI of a campaign map: NPCs moved jerkily on clients because their positions were updated rarely
 var config int NetClientRate;  // Bytes per second per client
+var config bool bFastCombatUpdates;
 var config int NetTickRate;    // Server updates per second
 
 var config bool bDebugLog; // Log positions of players on server and clients to compare synchronization
@@ -262,7 +263,8 @@ defaultproperties
 	bSoundLog=True
 	TravelConnectTimeout=60.0
 	TravelSwitchDelay=1.5
-	NetClientRate=40000
+	NetClientRate=500000
+	bFastCombatUpdates=True
 	NetTickRate=35
 	CoopLevels(0)="GEO_01A"
 	CoopLevels(1)="GEO_01B"

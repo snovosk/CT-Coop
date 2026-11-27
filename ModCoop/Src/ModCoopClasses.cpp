@@ -38,6 +38,19 @@ FNativeEntry<UCoopNative> UCoopNative::StaticNativeMap[] = {
 	MAP_NATIVE(ReadRelayStatus,0)
 	MAP_NATIVE(GetHostAddresses,0)
 	MAP_NATIVE(GetPublicAddress,0)
+	MAP_NATIVE(InstallProxyReceiver,0)
+	MAP_NATIVE(ReadProxyMovement,0)
+	MAP_NATIVE(SetProxyRenderFacing,0)
+	MAP_NATIVE(UpdateProxyLocomotion,0)
+	MAP_NATIVE(ReadCombatPose,0)
+	MAP_NATIVE(BeginCombatPose,0)
+	MAP_NATIVE(EndCombatPose,0)
+	MAP_NATIVE(HasCompletedFrameCapture,0)
+	MAP_NATIVE(CombatName,0)
+	MAP_NATIVE(CanSendCombatFrame,0)
+	MAP_NATIVE(SetCoopConnectionRate,0)
+	MAP_NATIVE(PackCombatWire,0)
+	MAP_NATIVE(UnpackCombatWire,0)
 	{NULL,NULL}
 };
 LINK_NATIVES(UCoopNative);
