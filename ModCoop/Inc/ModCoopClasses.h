@@ -46,6 +46,19 @@ public:
     void execReadRelayStatus(FFrame& Stack, void* Result);
     void execGetHostAddresses(FFrame& Stack, void* Result);
     void execGetPublicAddress(FFrame& Stack, void* Result);
+    void execInstallProxyReceiver(FFrame& Stack, void* Result);
+    void execReadProxyMovement(FFrame& Stack, void* Result);
+    void execSetProxyRenderFacing(FFrame& Stack, void* Result);
+    void execUpdateProxyLocomotion(FFrame& Stack, void* Result);
+    void execReadCombatPose(FFrame& Stack, void* Result);
+    void execBeginCombatPose(FFrame& Stack, void* Result);
+    void execEndCombatPose(FFrame& Stack, void* Result);
+    void execHasCompletedFrameCapture(FFrame& Stack, void* Result);
+    void execCombatName(FFrame& Stack, void* Result);
+    void execCanSendCombatFrame(FFrame& Stack, void* Result);
+    void execSetCoopConnectionRate(FFrame& Stack, void* Result);
+    void execPackCombatWire(FFrame& Stack, void* Result);
+    void execUnpackCombatWire(FFrame& Stack, void* Result);
     DECLARE_CLASS(UCoopNative,UObject,0,ModCoop)
     NO_DEFAULT_CONSTRUCTOR(UCoopNative)
     DECLARE_NATIVES(UCoopNative)

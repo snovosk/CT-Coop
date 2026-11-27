@@ -2772,6 +2772,23 @@ function SyncIncapacitated()
 	}
 }
 
+// Capture motion after host simulation, before the native replication pass.
+function CaptureCompletedFrame()
+{
+    local Controller MotionController;
+    local CoopPlayer MotionPlayer;
+    if(Level.NetMode!=NM_ListenServer || Lobby!=None || bWaitingForClients) return;
+    for(MotionController=Level.ControllerList;MotionController!=None;MotionController=MotionController.nextController)
+    {
+        MotionPlayer=CoopPlayer(MotionController);
+        if(MotionPlayer!=None)
+        {
+            MotionPlayer.EnsureCoopConnectionRate();
+            if(MotionPlayer.SnapshotSender!=None) MotionPlayer.SnapshotSender.Update(Level.TimeSeconds);
+        }
+    }
+}
+
 /*
  * The AI sets the stance of its pawn (CurrentIdleState: relaxed, alert, berserk, on a turret...) on the server. It is not replicated
  * and it selects the breathe, walk and run animations: on clients every NPC stayed in its default stance, e.g. droids walked around
@@ -2780,6 +2797,7 @@ function SyncIncapacitated()
  */
 event Tick(float DeltaTime)
 {
+	if(!class'CoopNative'.static.HasCompletedFrameCapture()) CaptureCompletedFrame();
 	TurnBotsToMove(DeltaTime);
 
 	if(TestAction ~= "elite" && ParseOption(TestOptions, "CoopTestFine") != "")

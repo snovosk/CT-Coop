@@ -1750,6 +1750,11 @@ static void InstallLoadMapOverride()
 	debugf(NAME_Warning, "ModCoop: UGameEngine::LoadMap slot not found");
 }
 
+#include "CoopProxyReceive.inl"
+#include "CoopPresentation.inl"
+#include "CoopCombatPresentation.inl"
+#include "CoopCombatCodec.inl"
+
 void UCoopNative::execInstallClientFixes(FFrame& Stack, void* Result)
 {
 	P_FINISH;
@@ -1757,6 +1762,9 @@ void UCoopNative::execInstallClientFixes(FFrame& Stack, void* Result)
 	InstallCrashLog();
 	InstallSelectTargetTypeGuard();
 	InstallLoadMapOverride();
+	InstallProxyReceiveDefaults();
+	InstallPresentationDraw();
+	InstallCombatNetTick();
 
 	static UBOOL Installed = 0;
 

@@ -53,12 +53,15 @@ var FunctionOverride PawnPlayFiringOverride;     // See PawnPawnPlayFiring
 var FunctionOverride MoverToKeyframeOverride;    // A level that starts on a moving lift waits for the clients (see CoopEndLift.ShouldHoldStartLift)
 var FunctionOverride HudDescriptionOverride;     // The player's name over the host and over a commando without a squad member (see PawnHudName)
 var FunctionOverride HudNicknameOverride;
+var FunctionOverride ProxyNetworkOverride;
 
 function Init(SWRCFix Fix)
 {
 	Log("ModCoop version " $ class'CoopConfig'.static.Version());
 	class'CoopNative'.static.LogSystemInfo();
 	class'CoopNative'.static.InstallClientFixes();
+	ProxyNetworkOverride=new class'FunctionOverride';
+	ProxyNetworkOverride.Init(class'Actor','PostNetworkReceive',self,'ProxyPostNetworkReceive');
 	class'CoopNative'.static.LoadSavedConfig(class'CoopConfig', "ModCoop.ini");
 	class'CoopConfig'.static.LoadLists();
 	class'CoopNative'.static.LoadSavedConfig(class'CoopGame', "ModCoop.ini");
@@ -1173,3 +1176,15 @@ function bool CriticalMessageInitActionFor(ScriptedController C)
 	return bResult;
 }
 
+
+simulated function ProxyPostNetworkReceive()
+{
+    local Actor A;
+    local CoopPlayer CP;
+    A=Actor(ProxyNetworkOverride.CurrentSelf);
+    if(A==None) return;
+    A.PostNetworkReceive(); // Preserve the original event, including non-pawns.
+    if(A.Level.NetMode!=NM_Client || Pawn(A)==None) return;
+    CP=CoopPlayer(A.Level.GetLocalPlayerController());
+    if(CP!=None) CP.ProxyNetworkReceived(Pawn(A));
+}

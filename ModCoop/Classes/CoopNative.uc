@@ -1,4 +1,4 @@
-class CoopNative extends Object native;
+class CoopNative extends Object native dependson(CoopMotionState);
 
 /*
  * CoopNative
@@ -81,3 +81,17 @@ native static final function string GetHostAddresses();
 
 // The address of this computer in the internet, empty until known. The first call asks api.ipify.org in the background.
 native static final function string GetPublicAddress();
+
+native static final function bool InstallProxyReceiver(Pawn P);
+native static final function bool ReadProxyMovement(Pawn P, out vector Position, out vector Velocity, out int Sequence);
+native static final function bool SetProxyRenderFacing(Pawn P, rotator Facing);
+native static final function bool UpdateProxyLocomotion(Pawn P, vector VisualVelocity, byte IdleState, byte MoveFlags, float DeltaTime);
+native static final function bool ReadCombatPose(Pawn P, out CoopMotionState.AnimPose Pose);
+native static final function MeshInstance BeginCombatPose(Pawn P, MeshInstance Visual, CoopMotionState.AnimPose Pose, float DeltaTime);
+native static final function bool EndCombatPose(Pawn P, MeshInstance Original, MeshInstance Visual);
+native static final function bool HasCompletedFrameCapture();
+native static final function name CombatName(string Text);
+native static final function bool CanSendCombatFrame(PlayerController PC);
+native static final function bool SetCoopConnectionRate(PlayerController PC,int Rate);
+native static final function string PackCombatWire(CoopMotionState.WirePose W);
+native static final function bool UnpackCombatWire(string Text,out CoopMotionState.WirePose W);
